@@ -5,5 +5,7 @@ import Foundation
 /// Rails submodule populated.
 public enum AssetManifest {
     public static let stylesheetPath = GeneratedAssetManifest.paths["flash.css"] ?? "/assets/flash-a561c1e5.css"
+    static let stylesheetTags = GeneratedAssetManifest.stylesheetTags
+    static let importmapTags = GeneratedAssetManifest.importmapTags
     public static let assets = GeneratedAssetManifest.paths
 }
