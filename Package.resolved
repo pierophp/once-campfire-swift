@@ -1,5 +1,5 @@
 {
-  "originHash" : "0398193bad875c6a9e40f508edeb7f257496c82cd14e7f322a25186ca046a3c3",
+  "originHash" : "9e90526e94251c1970391dca9071f8641d542a6acf1016f485356f1f3637f534",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -87,8 +87,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-crypto.git",
       "state" : {
-        "revision" : "a9d1d5ab8951ada40cafff8c8e2b551dfde4f390",
-        "version" : "5.0.0"
+        "revision" : "95ba0316a9b733e92bb6b071255ff46263bbe7dc",
+        "version" : "3.15.1"
       }
     },
     {
