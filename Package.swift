@@ -31,7 +31,8 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "SwiftSoup", package: "SwiftSoup"),
-            ]
+            ],
+            resources: [.copy("Resources")]
         ),
         .executableTarget(
             name: "Campfire",
