@@ -8,10 +8,11 @@ Scripts/compare-parity --build-swift
 
 The command copies the selected Rust seed into an independent writable database and storage
 directory for every container, logs in as the seeded David user, and requests the harness sequence
-currently implemented in Swift: `GET /session/new`, `POST /session`, then `GET /users/me/sidebar`.
-It compares the sidebar response; login pages and POST redirect/body envelopes are preconditions,
-not part of that route's response surface. It captures normalized responses under the system
-temporary directory's `campfire-swift-parity` folder and returns non-zero on any unmasked difference.
+currently implemented in Swift: `GET /session/new`, `POST /session`, `GET /users/me/sidebar`,
+`GET /rooms/:id`, and `GET /rooms/:id/messages?before=:message_id`. It compares the sidebar, room,
+and messages page responses; login pages and POST redirect/body envelopes are preconditions, not
+part of those route response surfaces. It captures normalized responses under the system temporary
+directory's `campfire-swift-parity` folder and returns non-zero on any unmasked difference.
 The default seed and account come from
 `once-campfire-rust/parity/.seed/default/labels.json`.
 

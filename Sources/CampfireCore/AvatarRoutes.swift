@@ -74,7 +74,7 @@ func installAvatarRoutes(on router: Router<BasicRequestContext>, database: SQLit
     }
 }
 
-private func httpDate(_ date: Date) -> String {
+func httpDate(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
     formatter.timeZone = TimeZone(secondsFromGMT: 0)
