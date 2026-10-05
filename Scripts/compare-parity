@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""Compare implemented Swift HTTP routes with campfire-rust on identical parity seeds."""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import gzip
+import html
+import http.client
+from html.parser import HTMLParser
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+
+
+ROOT = Path(__file__).resolve().parent.parent
+RUST_CANDIDATES = (ROOT.parent / "once-campfire-rust", ROOT.parents[1] / "once-campfire-rust")
+DEFAULT_RUST_ROOT = next((path for path in RUST_CANDIDATES if (path / "parity/.seed").is_dir()), RUST_CANDIDATES[0])
+RUST_ROOT = Path(os.environ.get("CAMPFIRE_RUST_ROOT", DEFAULT_RUST_ROOT))
+SEED_ROOT = Path(os.environ.get("CAMPFIRE_PARITY_SEED_DIR", RUST_ROOT / "parity/.seed"))
+DEFAULT_SECRET = "5335c3b1ad35b4ad170c3413bd651ef3b6ed64e257261871a6de3f978cf3868ee417a927040935fb30b0f7debdedb34a2a403e9f34b16cf594c917c2ecd4a995"
+
+# Deliberate normalizations. Every entry is also printed in the final report.
+MASK_REASONS = {
+    "CSRF tags": "the Rust server intentionally omits Rails authenticity tokens; the harness reads the token when present, then sends an empty value otherwise",
+    "request ids": "each server generates an unrelated id per HTTP request and it is operational metadata, not response behavior",
+    "HTTP Date and Server headers": "these identify the runtime and request time; neither is part of the selected application response contract",
+    "Set-Cookie values": "Rails encrypted session cookies use random nonces and session tokens are independently random; cookie names and attributes remain compared",
+    "ETag digests": "each server hashes its raw HTML bytes before parity canonicalization; layout whitespace and fingerprinted asset paths legitimately change the digest, so the weak validator and 32-hex digest shape remain checked while only the digest value is normalized",
+    "ISO timestamps": "the seed is shared, but each server renders request-time timestamps from its own clock",
+    "asset digests": "Rails Propshaft and the Swift build generate runtime-specific digests for the same named asset; the path and extension remain compared",
+}
+
+HEADER_NAMES = ("content-type", "cache-control", "etag", "last-modified", "vary", "location")
+ASSET_DIGEST = re.compile(r"(?P<name>/assets/[^\s\"'()?#]+?)-[0-9a-f]{7,64}(?P<ext>\.[A-Za-z0-9.]+)")
+ISO_TIME = re.compile(r"\b\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:?\d\d)\b")
+
+
+class CanonicalHTML(HTMLParser):
+    """Small canonical serializer: preserve structure, sort attributes, collapse HTML whitespace."""
+
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+    CSRF_NAMES = {"csrf-token", "csrf-param", "authenticity_token"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.skip_depth = 0
+        self.raw_text_tags: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = dict(attrs)
+        attr_name = attrs_dict.get("name")
+        if (tag == "meta" and attr_name in self.CSRF_NAMES) or (tag == "input" and attr_name == "authenticity_token"):
+            return
+        if self.skip_depth:
+            return
+        normalized = []
+        for key, value in attrs:
+            if value is None:
+                normalized.append((key, None))
+                continue
+            value = mask_values(value)
+            normalized.append((key, value))
+        attr_text = "".join(f" {key}" if value is None or value == "" else f" {key}={json.dumps(value, ensure_ascii=False)}" for key, value in sorted(normalized))
+        self.parts.append(f"<{tag}{attr_text}>")
+        if tag in {"script", "style", "pre", "textarea"}:
+            self.raw_text_tags.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.skip_depth:
+            self.skip_depth -= 1
+        elif tag not in self.VOID:
+            self.parts.append(f"</{tag}>")
+        if self.raw_text_tags and self.raw_text_tags[-1] == tag:
+            self.raw_text_tags.pop()
+
+    def handle_data(self, data: str) -> None:
+        if self.skip_depth:
+            return
+        if self.raw_text_tags:
+            text = mask_values(data)
+        else:
+            text = mask_values(re.sub(r"[\t\n\f\r ]+", " ", data).strip())
+        if text:
+            self.parts.append(text)
+
+    def handle_comment(self, data: str) -> None:
+        if not self.skip_depth and data.strip():
+            self.parts.append(f"<!-- {mask_values(data.strip())} -->")
+
+
+def mask_values(value: str) -> str:
+    value = ISO_TIME.sub("<timestamp>", value)
+    return ASSET_DIGEST.sub(lambda m: f"{m.group('name')}-<digest>{m.group('ext')}", value)
+
+
+def normalize_body(body: bytes, content_type: str) -> str:
+    if content_type.lower().startswith("text/html") or b"<html" in body[:512].lower() or b"<!doctype" in body[:512].lower():
+        parser = CanonicalHTML()
+        parser.feed(body.decode("utf-8", errors="replace"))
+        return "\n".join(parser.parts) + "\n"
+    return body.decode("utf-8", errors="replace")
+
+
+def cookie_shape(headers: list[tuple[str, str]]) -> list[str]:
+    shape = []
+    for name, value in headers:
+        if name.lower() != "set-cookie":
+            continue
+        bits = [part.strip() for part in value.split(";")]
+        cookie_name = bits[0].split("=", 1)[0]
+        attrs = sorted("expires=<expiry>" if part.lower().startswith("expires=") else part.lower() for part in bits[1:])
+        shape.append(cookie_name + ";" + ";".join(attrs))
+    return sorted(shape)
+
+
+def request(base: str, method: str, path: str, headers: dict[str, str] | None = None, body: bytes = b"") -> dict:
+    parsed = urllib.parse.urlsplit(base)
+    conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=90)
+    # Keep Host identical despite the two services using different host-side published ports.
+    req_headers = {"Host": "localhost:3100", "Accept-Encoding": "gzip", "Connection": "close"}
+    req_headers.update(headers or {})
+    conn.request(method, path, body=body, headers=req_headers)
+    response = conn.getresponse()
+    raw = response.read()
+    response_headers = response.getheaders()
+    status = response.status
+    if response.getheader("Content-Encoding", "").lower() == "gzip":
+        raw = gzip.decompress(raw)
+    conn.close()
+    return {"status": status, "headers": response_headers, "body": raw}
+
+
+def normalized_capture(response: dict) -> dict:
+    raw_headers = response["headers"]
+    headers_lower = {key.lower(): value for key, value in raw_headers}
+    selected = {key: headers_lower[key] for key in HEADER_NAMES if key in headers_lower}
+    if "etag" in selected:
+        if not re.fullmatch(r'W/"[0-9a-f]{32}"', selected["etag"]):
+            raise ValueError(f"unexpected ETag format: {selected['etag']!r}")
+        selected["etag"] = 'W/"<digest>"'
+    # Date, Server and X-Request-Id are intentionally excluded as runtime/request metadata.
+    return {
+        "status": response["status"],
+        "headers": selected,
+        "cookies_set": cookie_shape(raw_headers),
+        "body": normalize_body(response["body"], headers_lower.get("content-type", "")),
+    }
+
+
+def wait_ready(base: str, name: str, process: subprocess.Popen) -> None:
+    last = None
+    for _ in range(180):
+        if process.poll() is not None:
+            raise RuntimeError(f"{name} container exited before /up returned 2xx")
+        try:
+            if request(base, "GET", "/up")["status"] < 300:
+                return
+        except OSError as error:
+            last = error
+        time.sleep(0.25)
+    raise RuntimeError(f"{name} did not become ready: {last}")
+
+
+def docker_run(image: str, name: str, seed_copy: Path, port: int, cpu_set: str, secret: str) -> subprocess.Popen:
+    command = [
+        "docker", "run", "--rm", "--name", name,
+        "--cpuset-cpus", cpu_set,
+        "--user", f"{os.getuid()}:{os.getgid()}",
+        "-p", f"127.0.0.1:{port}:80",
+        "-e", "HTTP_PORT=80", "-e", f"SECRET_KEY_BASE={secret}",
+        "-e", "RAILS_MAX_THREADS=5", "-e", "DISABLE_SSL=true",
+        "-v", f"{seed_copy / 'db'}:/rails/storage/db",
+        "-v", f"{seed_copy / 'storage'}:/rails/storage/files",
+        image,
+    ]
+    return subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+
+def login(base: str, email: str, password: str) -> tuple[list[str], str]:
+    captures = []
+    first = request(base, "GET", "/session/new")
+    captures.append(normalized_capture(first))
+    body_text = first["body"].decode("utf-8", errors="replace")
+    csrf_match = re.search(r'<meta\s+name=["\']csrf-token["\']\s+content=["\']([^"\']*)', body_text, re.I)
+    token = html.unescape(csrf_match.group(1)) if csrf_match else ""
+    cookie_parts = []
+    for _, value in first["headers"]:
+        if _.lower() == "set-cookie":
+            cookie_parts.append(value.split(";", 1)[0])
+    form = urllib.parse.urlencode({"email_address": email, "password": password, "authenticity_token": token}).encode()
+    second = request(base, "POST", "/session", {
+        "Cookie": "; ".join(cookie_parts),
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Sec-Fetch-Site": "same-origin",
+    }, form)
+    captures.append(normalized_capture(second))
+    for key, value in second["headers"]:
+        if key.lower() == "set-cookie":
+            cookie_parts.append(value.split(";", 1)[0])
+    if second["status"] != 302 or not any(cookie.split("=", 1)[0] == "session_token" for cookie in cookie_parts):
+        raise RuntimeError(f"login failed at {base}: status={second['status']}, cookies={cookie_shape(second['headers'])}")
+    return captures, "; ".join(dict.fromkeys(cookie_parts))
+
+
+def read_labels(path: Path) -> dict:
+    return json.loads(path.read_text())
+
+
+def start_container(image: str, name: str, seed: Path, port: int, cpu_set: str, secret: str, copies: Path) -> subprocess.Popen:
+    dst = copies / name
+    shutil.copytree(seed / "db", dst / "db")
+    shutil.copytree(seed / "storage", dst / "storage")
+    return docker_run(image, name, dst, port, cpu_set, secret)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seed", default="default", help="seed directory under CAMPFIRE_PARITY_SEED_DIR (default: default)")
+    parser.add_argument("--rust-image", default=os.environ.get("CAMPFIRE_RUST_IMAGE", "campfire-rust:latest"))
+    parser.add_argument("--swift-image", default=os.environ.get("CAMPFIRE_SWIFT_IMAGE", "campfire-swift:parity"))
+    parser.add_argument("--build-swift", action="store_true", help="build the Swift image from this checkout before running")
+    parser.add_argument("--with-reference", action="store_true", help="also compare against campfire-reference:latest")
+    parser.add_argument("--reference-image", default=os.environ.get("CAMPFIRE_REFERENCE_IMAGE", "campfire-reference:latest"))
+    parser.add_argument("--cpu-set", default=os.environ.get("CAMPFIRE_CPUSET_CPUS", "0,1"), help="Docker CPU set; override for Docker Desktop, e.g. --cpu-set 2-3")
+    parser.add_argument("--swift-port", type=int, default=38101)
+    parser.add_argument("--rust-port", type=int, default=38102)
+    parser.add_argument("--reference-port", type=int, default=38103)
+    parser.add_argument("--output", type=Path, default=Path(tempfile.gettempdir()) / "campfire-swift-parity")
+    parser.add_argument("--email", default=None, help="login email (defaults to labels.json emails.david)")
+    parser.add_argument("--password", default=None, help="login password (defaults to labels.json passwords.all)")
+    args = parser.parse_args()
+
+    seed = SEED_ROOT / args.seed
+    if not (seed / "db/production.sqlite3").is_file():
+        parser.error(f"seed not found at {seed}; build it with once-campfire-rust/parity/bin/seed build {args.seed}")
+    labels = read_labels(seed / "labels.json")
+    email = args.email or labels["emails.david"]
+    password = args.password or labels["passwords.all"]
+    if args.build_swift:
+        subprocess.run(["docker", "build", "-t", args.swift_image, "-f", str(ROOT / "Dockerfile"), str(ROOT)], check=True)
+    args.output.mkdir(parents=True, exist_ok=True)
+    for file in args.output.iterdir():
+        if file.is_file():
+            file.unlink()
+        elif file.is_dir():
+            shutil.rmtree(file)
+
+    container_names = [f"campfire-parity-{os.getpid()}-{name}" for name in (["swift", "rust", "reference"] if args.with_reference else ["swift", "rust"])]
+    ports = [args.swift_port, args.rust_port] + ([args.reference_port] if args.with_reference else [])
+    images = [args.swift_image, args.rust_image] + ([args.reference_image] if args.with_reference else [])
+    labels_names = ["swift", "rust"] + (["reference"] if args.with_reference else [])
+    captures: dict[str, list[dict]] = {}
+    processes: list[subprocess.Popen] = []
+    with tempfile.TemporaryDirectory(prefix="campfire-parity-seeds-") as temp:
+        copies = Path(temp)
+        try:
+            for name, image, cname, port in zip(labels_names, images, container_names, ports):
+                proc = start_container(image, cname, seed, port, args.cpu_set, DEFAULT_SECRET, copies)
+                processes.append(proc)
+                base = f"http://127.0.0.1:{port}"
+                wait_ready(base, name, proc)
+                login_captures, cookie = login(base, email, password)
+                captures[name] = login_captures
+                sidebar = request(base, "GET", "/users/me/sidebar", {"Cookie": cookie})
+                captures[name].append(normalized_capture(sidebar))
+                if sidebar["status"] >= 400:
+                    raise RuntimeError(f"{name} sidebar returned {sidebar['status']}")
+            baseline = captures["rust"]
+            failures = []
+            for name in labels_names:
+                if name == "rust":
+                    continue
+                # Login is the harness precondition. Its template and redirect envelope are outside
+                # the current route's parity surface; compare only the implemented sidebar response.
+                for index, step in ((2, "GET /users/me/sidebar"),):
+                    left, right = baseline[index], captures[name][index]
+                    for field in ("status", "headers", "cookies_set", "body"):
+                        if right[field] != left[field]:
+                            failures.append((name, step, field, left[field], right[field]))
+                            if field == "body":
+                                (args.output / f"{name}-{index}.diff").write_text("".join(difflib.unified_diff(left[field].splitlines(True), right[field].splitlines(True), fromfile="rust", tofile=name)))
+            report = {"seed": args.seed, "email": email, "cpu_set": args.cpu_set, "masks": MASK_REASONS, "results": captures}
+            (args.output / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+            if failures:
+                for name, step, field, expected, actual in failures:
+                    print(f"FAIL {name} {step} {field} differs", file=sys.stderr)
+                    if field != "body":
+                        print(f"  Rust:  {expected!r}\n  {name}: {actual!r}", file=sys.stderr)
+                print(f"Diffs and captures: {args.output}", file=sys.stderr)
+                return 1
+            print(f"PASS: {' vs '.join(name for name in labels_names)} match for login and sidebar (seed {args.seed})")
+            print(f"Captures: {args.output / 'report.json'}")
+            print("Masks applied:")
+            for mask, reason in MASK_REASONS.items():
+                print(f"  {mask}: {reason}")
+            return 0
+        finally:
+            for proc in processes:
+                proc.terminate()
+            for proc in processes:
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            for cname in container_names:
+                subprocess.run(["docker", "rm", "-f", cname], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f"compare-parity: {error}", file=sys.stderr)
+        raise SystemExit(1)

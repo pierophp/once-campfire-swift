@@ -5,6 +5,7 @@ import Hummingbird
 struct SignedInUser: Sendable {
     let id: Int64
     let name: String
+    let updatedAt: String
     let role: Int64
     let email: String?
 }
@@ -32,7 +33,7 @@ enum SessionPipeline {
         guard let session, let sessionID = session.integer(0), let userID = session.integer(1) else { return nil }
         let userRow = try await Task.detached {
             try database.read { connection in
-                try connection.firstRow("SELECT id, name, role, email_address FROM users WHERE id=? AND status=0 LIMIT 1", bindings: [.integer(userID)])
+                try connection.firstRow("SELECT id, name, role, email_address, updated_at FROM users WHERE id=? AND status=0 LIMIT 1", bindings: [.integer(userID)])
             }
         }.value
         guard let userRow, let id = userRow.integer(0), let name = userRow.string(1) else { return nil }
@@ -44,7 +45,7 @@ enum SessionPipeline {
                 }
             }.value
         }
-        return RequestSession(token: token, user: SignedInUser(id: id, name: name, role: userRow.integer(2) ?? 0, email: userRow.string(3)), refreshed: refreshed)
+        return RequestSession(token: token, user: SignedInUser(id: id, name: name, updatedAt: userRow.string(4) ?? "", role: userRow.integer(2) ?? 0, email: userRow.string(3)), refreshed: refreshed)
     }
 
     static func appendRefreshCookie(_ session: RequestSession, to response: inout Response) {

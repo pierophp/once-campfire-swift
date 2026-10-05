@@ -3,25 +3,24 @@ import HTTPTypes
 import Hummingbird
 import NIOCore
 
-struct SidebarAccount: Sendable { let name: String }
-struct SidebarRoom: Sendable { let id: Int64; let name: String; let unread: Bool }
-struct SidebarUser: Sendable { let id: Int64; let name: String }
+struct SidebarAccount: Sendable { let name: String; let logoVersion: String; let customStyles: String? }
+struct SidebarRoom: Sendable { let id: Int64; let name: String; let type: String; let unread: Bool; let updatedAtEpoch: String }
+struct SidebarUser: Sendable { let id: Int64; let name: String; let updatedAt: String }
 struct SidebarDirect: Sendable { let id: Int64; let unread: Bool; let updatedAt: String; let members: [SidebarUser] }
 struct SidebarLayout: Sendable {
     let account: SidebarAccount
-    let logoBlobID: Int64?
     let lastRoomID: Int64?
 
     static func load(request: Request, user: SignedInUser, database: SQLiteDatabase) async throws -> SidebarLayout {
         let lastRoomCookie = cookieInteger("last_room", request.headers[.cookie])
         return try await Task.detached {
             try database.read { connection in
-                let account = try connection.firstRow("SELECT a.id, a.name, (SELECT b.id FROM active_storage_attachments x INNER JOIN active_storage_blobs b ON b.id=x.blob_id WHERE x.record_type='Account' AND x.record_id=a.id AND x.name='logo' LIMIT 1) FROM accounts a ORDER BY a.id ASC LIMIT 1")
+                let account = try connection.firstRow("SELECT a.id, a.name, strftime('%Y%m%d%H%M%S', a.updated_at), a.custom_styles, (SELECT b.id FROM active_storage_attachments x INNER JOIN active_storage_blobs b ON b.id=x.blob_id WHERE x.record_type='Account' AND x.record_id=a.id AND x.name='logo' LIMIT 1) FROM accounts a ORDER BY a.id ASC LIMIT 1")
                 let roomID: Int64?
                 if let lastRoomCookie {
                     roomID = try connection.firstRow("SELECT r.id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(lastRoomCookie), .integer(user.id)])?.integer(0)
                 } else { roomID = nil }
-                return SidebarLayout(account: SidebarAccount(name: account?.string(1) ?? "Campfire"), logoBlobID: account?.integer(2), lastRoomID: roomID)
+                return SidebarLayout(account: SidebarAccount(name: account?.string(1) ?? "Campfire", logoVersion: account?.string(2) ?? "", customStyles: account?.string(3)), lastRoomID: roomID)
             }
         }.value
     }
@@ -30,6 +29,7 @@ struct SidebarData: Sendable {
     let shared: [SidebarRoom]
     let directs: [SidebarDirect]
     let placeholders: [SidebarUser]
+    let canCreateRooms: Bool
 }
 
 func installSidebarRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase) {
@@ -50,23 +50,32 @@ func installSidebarRoutes(on router: Router<BasicRequestContext>, database: SQLi
                     guard let roomID = row.integer(1), let type = row.string(5) else { continue }
                     let unread = row.string(2) != nil
                     if type == "Rooms::Direct" {
-                        let users = try connection.rows("SELECT u.id, u.name FROM memberships m INNER JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.user_id!=? AND u.status=0 ORDER BY m.id", bindings: [.integer(roomID), .integer(session.user.id)])
-                        let members = users.compactMap { row -> SidebarUser? in guard let id = row.integer(0), let name = row.string(1) else { return nil }; return SidebarUser(id: id, name: name) }
-                        let fallback = members.isEmpty ? [SidebarUser(id: session.user.id, name: session.user.name)] : members
-                        directs.append(SidebarDirect(id: roomID, unread: unread, updatedAt: row.string(6) ?? "", members: fallback))
+                        let users = try connection.rows("SELECT u.id, u.name, u.updated_at FROM memberships m INNER JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.user_id!=? AND u.status=0", bindings: [.integer(roomID), .integer(session.user.id)])
+                        let members = users.compactMap { row -> SidebarUser? in guard let id = row.integer(0), let name = row.string(1) else { return nil }; return SidebarUser(id: id, name: name, updatedAt: row.string(2) ?? "") }
+                        let fallback = members.isEmpty ? [SidebarUser(id: session.user.id, name: session.user.name, updatedAt: "")] : members
+                        let epoch = try connection.firstRow("SELECT CAST(strftime('%s', ?) AS INTEGER) * 1000 + CAST(substr(strftime('%f', ?), 4, 3) AS INTEGER)", bindings: [.text(row.string(6) ?? ""), .text(row.string(6) ?? "")])?.integer(0) ?? 0
+                        directs.append(SidebarDirect(id: roomID, unread: unread, updatedAt: String(epoch), members: fallback))
                     } else {
-                        shared.append(SidebarRoom(id: roomID, name: row.string(4) ?? "", unread: unread))
+                        let epoch = try connection.firstRow("SELECT CAST(strftime('%s', ?) AS INTEGER) * 1000 + CAST(substr(strftime('%f', ?), 4, 3) AS INTEGER)", bindings: [.text(row.string(6) ?? ""), .text(row.string(6) ?? "")])?.integer(0) ?? 0
+                        shared.append(SidebarRoom(id: roomID, name: row.string(4) ?? "", type: type, unread: unread, updatedAtEpoch: String(epoch)))
                     }
                 }
                 directs.sort { $0.updatedAt > $1.updatedAt }
-                let placeholderRows = try connection.rows("SELECT u.id, u.name FROM users u WHERE u.status=0 AND u.id!=? AND u.id NOT IN (SELECT m.user_id FROM memberships m INNER JOIN rooms r ON r.id=m.room_id WHERE r.type='Rooms::Direct') ORDER BY u.created_at ASC LIMIT 20", bindings: [.integer(session.user.id)])
-                let placeholders = placeholderRows.compactMap { row -> SidebarUser? in guard let id = row.integer(0), let name = row.string(1) else { return nil }; return SidebarUser(id: id, name: name) }
-                return SidebarData(shared: shared, directs: directs, placeholders: placeholders)
+                let directUserIDs = try connection.rows("SELECT DISTINCT m.user_id FROM memberships m WHERE m.room_id IN (SELECT mine.room_id FROM memberships mine INNER JOIN rooms r ON r.id=mine.room_id WHERE mine.user_id=? AND r.type='Rooms::Direct')", bindings: [.integer(session.user.id)])
+                    .compactMap { $0.integer(0) }
+                let excludedIDs = directUserIDs + [session.user.id]
+                let placeholderLimit = max(20 - excludedIDs.count, 0)
+                let placeholders = excludedIDs.map { _ in "?" }.joined(separator: ",")
+                let placeholderRows = try connection.rows("SELECT u.id, u.name, u.updated_at FROM users u WHERE u.status=0 AND u.id NOT IN (\(placeholders)) ORDER BY u.created_at ASC LIMIT \(placeholderLimit)", bindings: excludedIDs.map(SQLiteValue.integer))
+                let placeholderUsers = placeholderRows.compactMap { row -> SidebarUser? in guard let id = row.integer(0), let name = row.string(1) else { return nil }; return SidebarUser(id: id, name: name, updatedAt: row.string(2) ?? "") }
+                let settings = try connection.firstRow("SELECT settings FROM accounts ORDER BY id ASC LIMIT 1")?.string(0)
+                let restricted = settings.flatMap { data -> Bool? in guard let bytes = data.data(using: .utf8), let json = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { return nil }; return json["restrict_room_creation_to_administrators"] as? Bool } ?? false
+                return SidebarData(shared: shared, directs: directs, placeholders: placeholderUsers, canCreateRooms: session.user.role == 1 || !restricted)
             }
         }.value
 
         let flash = SessionPipeline.readFlash(request)
-        let html = SidebarRenderer.render(user: session.user, account: layout.account, lastRoomID: layout.lastRoomID, shared: data.shared, directs: data.directs, placeholders: data.placeholders, flash: flash)
+        let html = SidebarRenderer.render(user: session.user, account: layout.account, lastRoomID: layout.lastRoomID, shared: data.shared, directs: data.directs, placeholders: data.placeholders, canCreateRooms: data.canCreateRooms, flash: flash)
         let tag = etag(for: html)
         var response: Response
         if request.headers[HTTPField.Name("if-none-match")!] == tag {

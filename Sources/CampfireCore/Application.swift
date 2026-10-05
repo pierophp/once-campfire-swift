@@ -12,7 +12,7 @@ public func makeApplication(
     let router = Router()
     installLoginRoutes(on: router, database: database)
     installSidebarRoutes(on: router, database: database)
-    router.get("/assets/flash-a561c1e5.css") { _, _ -> Response in
+    router.get(RouterPath(AssetManifest.stylesheetPath)) { _, _ -> Response in
         var response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: ":root{color-scheme:light dark}.sidebar{display:block}.flash{padding:.5rem}")))
         response.headers[.contentType] = "text/css; charset=utf-8"
         response.headers[HTTPField.Name("cache-control")!] = "public, max-age=2592000"
