@@ -291,6 +291,10 @@ def main() -> int:
                 captures[name].append(normalized_capture(room))
                 if room["status"] >= 400:
                     raise RuntimeError(f"{name} room page returned {room['status']}")
+                search = request(base, "GET", "/searches?q=coffee", {"Cookie": cookie})
+                captures[name].append(normalized_capture(search))
+                if search["status"] >= 400:
+                    raise RuntimeError(f"{name} search page returned {search['status']}")
                 before_id = labels["messages.busy_060"]
                 messages_page = request(base, "GET", f"/rooms/{room_id}/messages?before={before_id}", {"Cookie": cookie})
                 captures[name].append(normalized_capture(messages_page))
@@ -301,12 +305,13 @@ def main() -> int:
             for name in labels_names:
                 if name == "rust":
                     continue
-                # Login is the harness precondition. Compare only the completed sidebar and room
-                # page surfaces; login's current template is not part of either route contract.
+                # Login is the harness precondition. Compare completed page surfaces; login's
+                # template is not part of these route contracts.
                 for index, step in (
                     (2, "GET /users/me/sidebar"),
                     (3, f"GET /rooms/{labels['rooms.watercooler']}"),
-                    (4, f"GET /rooms/{labels['rooms.watercooler']}/messages?before={labels['messages.busy_060']}"),
+                    (4, "GET /searches?q=coffee"),
+                    (5, f"GET /rooms/{labels['rooms.watercooler']}/messages?before={labels['messages.busy_060']}"),
                 ):
                     left, right = baseline[index], captures[name][index]
                     for field in ("status", "headers", "cookies_set", "body"):
@@ -323,7 +328,7 @@ def main() -> int:
                         print(f"  Rust:  {expected!r}\n  {name}: {actual!r}", file=sys.stderr)
                 print(f"Diffs and captures: {args.output}", file=sys.stderr)
                 return 1
-            print(f"PASS: {' vs '.join(name for name in labels_names)} match for login, sidebar, room, and messages page (seed {args.seed})")
+            print(f"PASS: {' vs '.join(name for name in labels_names)} match for sidebar, room, messages, and search pages (seed {args.seed})")
             print(f"Captures: {args.output / 'report.json'}")
             print("Masks applied:")
             for mask, reason in MASK_REASONS.items():
