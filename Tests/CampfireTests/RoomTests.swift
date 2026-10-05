@@ -70,6 +70,49 @@ final class RoomTests: XCTestCase {
         }
     }
 
+    func testMessagesPageReturnsFortyEarlierMessagesAndSupportsFreshness() async throws {
+        try await withSeed { databasePath, seed in
+            let labels = try JSONSerialization.jsonObject(with: Data(contentsOf: seed.appending(path: "labels.json"))) as! [String: Any]
+            let roomID = try XCTUnwrap(labels["rooms.watercooler"] as? Int)
+            let beforeID = try XCTUnwrap(labels["messages.busy_060"] as? Int)
+            let database = try SQLiteDatabase(path: databasePath)
+            let expectedIDs = try database.read { connection in
+                Array(try connection.rows("SELECT id FROM messages WHERE room_id=? AND created_at < (SELECT created_at FROM messages WHERE id=?) ORDER BY created_at DESC LIMIT 40", bindings: [.integer(Int64(roomID)), .integer(Int64(beforeID))]).compactMap { $0.integer(0) }.reversed())
+            }
+            XCTAssertEqual(expectedIDs.count, 40)
+            let firstMessageID = try database.read { connection in
+                try XCTUnwrap(connection.firstRow("SELECT id FROM messages WHERE room_id=? ORDER BY created_at ASC LIMIT 1", bindings: [.integer(Int64(roomID))])?.integer(0))
+            }
+            let app = try makeApplication(databasePath: databasePath, database: database)
+            try await app.test(.router) { client in
+                let memberCookie = try await roomLogin(client)
+                var headers = HTTPFields(); headers[.cookie] = memberCookie
+                let response = try await client.execute(uri: "/rooms/\(roomID)/messages?before=\(beforeID)", method: .get, headers: headers)
+                XCTAssertEqual(response.status.code, 200)
+                let html = String(buffer: response.body)
+                let ids = html.matches(for: #"data-message-id="(\d+)""#).compactMap { Int64($0) }
+                XCTAssertEqual(ids, expectedIDs)
+                XCTAssertFalse(html.contains("<html"), "the messages endpoint returns only the message fragment")
+                XCTAssertNotNil(response.headers[HTTPField.Name("last-modified")!])
+                let etag = try XCTUnwrap(response.headers[HTTPField.Name("etag")!])
+
+                headers[HTTPField.Name("if-none-match")!] = etag
+                let unchanged = try await client.execute(uri: "/rooms/\(roomID)/messages?before=\(beforeID)", method: .get, headers: headers)
+                XCTAssertEqual(unchanged.status.code, 304)
+                XCTAssertEqual(unchanged.headers[HTTPField.Name("etag")!], etag)
+
+                headers[HTTPField.Name("if-none-match")!] = nil
+                let empty = try await client.execute(uri: "/rooms/\(roomID)/messages?before=\(firstMessageID)", method: .get, headers: headers)
+                XCTAssertEqual(empty.status.code, 204)
+
+                var outsiderHeaders = HTTPFields(); outsiderHeaders[.cookie] = try await roomLogin(client, email: "lou@37signals.com")
+                let denied = try await client.execute(uri: "/rooms/\(roomID)/messages?before=\(beforeID)", method: .get, headers: outsiderHeaders)
+                XCTAssertEqual(denied.status.code, 302)
+                XCTAssertEqual(denied.headers[.location], "/")
+            }
+        }
+    }
+
     private func withSeed(_ body: (String, URL) async throws -> Void) async throws {
         let source = seedDirectory
         guard FileManager.default.fileExists(atPath: source.appending(path: "db/production.sqlite3").path),
