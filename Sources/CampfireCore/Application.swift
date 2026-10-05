@@ -10,6 +10,7 @@ public func makeApplication(
 ) throws -> Application<RouterResponder<BasicRequestContext>> {
     let database = try suppliedDatabase ?? SQLiteDatabase(path: databasePath)
     let router = Router()
+    router.addMiddleware { GzipMiddleware() }
     installLoginRoutes(on: router, database: database)
     installSidebarRoutes(on: router, database: database)
     router.get("/assets/flash-a561c1e5.css") { _, _ -> Response in
