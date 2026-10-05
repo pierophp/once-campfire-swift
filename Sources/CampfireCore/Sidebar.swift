@@ -52,7 +52,7 @@ func installSidebarRoutes(on router: Router<BasicRequestContext>, database: SQLi
                     if type == "Rooms::Direct" {
                         let users = try connection.rows("SELECT u.id, u.name, u.updated_at FROM memberships m INNER JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.user_id!=? AND u.status=0", bindings: [.integer(roomID), .integer(session.user.id)])
                         let members = users.compactMap { row -> SidebarUser? in guard let id = row.integer(0), let name = row.string(1) else { return nil }; return SidebarUser(id: id, name: name, updatedAt: row.string(2) ?? "") }
-                        let fallback = members.isEmpty ? [SidebarUser(id: session.user.id, name: session.user.name, updatedAt: "")] : members
+                        let fallback = members.isEmpty ? [SidebarUser(id: session.user.id, name: session.user.name, updatedAt: session.user.updatedAt)] : members
                         let epoch = try connection.firstRow("SELECT CAST(strftime('%s', ?) AS INTEGER) * 1000 + CAST(substr(strftime('%f', ?), 4, 3) AS INTEGER)", bindings: [.text(row.string(6) ?? ""), .text(row.string(6) ?? "")])?.integer(0) ?? 0
                         directs.append(SidebarDirect(id: roomID, unread: unread, updatedAt: String(epoch), members: fallback))
                     } else {

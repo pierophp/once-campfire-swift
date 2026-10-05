@@ -10,7 +10,7 @@ import XCTest
 
 final class AvatarAssetTests: XCTestCase {
     func testJasonAvatarTokenServesSeededWebPBytesAndRailsCacheHeaders() async throws {
-        try await withSeed { databasePath, filesPath, labels in
+        try await withSeed { databasePath, filesPath, _ in
             let app = try makeApplication(databasePath: databasePath, avatarFilesPath: filesPath)
             try await app.test(.router) { client in
                 var loginHeaders = HTTPFields()
@@ -22,7 +22,9 @@ final class AvatarAssetTests: XCTestCase {
                 var headers = HTTPFields()
                 headers[.cookie] = cookie
                 headers[.acceptEncoding] = "identity"
-                let response = try await client.execute(uri: "/users/\(labels["avatar_tokens.jason"]!)/avatar", method: .get, headers: headers)
+                let secret = ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base"
+                let avatarToken = RailsSignedID(secretKeyBase: secret).generate(model: "User", id: 149087659, purpose: "avatar")
+                let response = try await client.execute(uri: "/users/\(avatarToken)/avatar", method: .get, headers: headers)
 
                 XCTAssertEqual(response.status.code, 200)
                 XCTAssertEqual(response.headers[.contentType], "image/webp")
