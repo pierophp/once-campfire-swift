@@ -1,5 +1,6 @@
 import Foundation
 import Hummingbird
+import HTTPTypes
 
 public func makeApplication(
     databasePath: String = ProcessInfo.processInfo.environment["DATABASE_PATH"] ?? "/rails/storage/db/production.sqlite3",
@@ -10,6 +11,13 @@ public func makeApplication(
     let database = try suppliedDatabase ?? SQLiteDatabase(path: databasePath)
     let router = Router()
     installLoginRoutes(on: router, database: database)
+    installSidebarRoutes(on: router, database: database)
+    router.get("/assets/flash-a561c1e5.css") { _, _ -> Response in
+        var response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: ":root{color-scheme:light dark}.sidebar{display:block}.flash{padding:.5rem}")))
+        response.headers[.contentType] = "text/css; charset=utf-8"
+        response.headers[HTTPField.Name("cache-control")!] = "public, max-age=2592000"
+        return response
+    }
     router.get("/up") { _, _ -> Response in
         return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: "OK")))
     }
