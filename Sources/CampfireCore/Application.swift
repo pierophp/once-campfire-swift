@@ -16,6 +16,7 @@ public func makeApplication(
     installLoginRoutes(on: router, database: database)
     installSidebarRoutes(on: router, database: database)
     installRoomRoutes(on: router, database: database, fragmentCache: fragmentCache)
+    installSearchRoutes(on: router, database: database, fragmentCache: fragmentCache)
     installAvatarRoutes(on: router, database: database, filesPath: avatarFilesPath)
     router.get("/assets/flash-a561c1e5.css") { _, _ -> Response in
         var response = Response(status: .ok, body: .init(byteBuffer: StaticAssets.flashStylesheet))

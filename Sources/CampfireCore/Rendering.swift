@@ -29,7 +29,7 @@ private final class RenderCapacity: @unchecked Sendable {
 }
 
 enum SidebarRenderer {
-    static func render(user: SignedInUser, account: SidebarAccount, lastRoomID: Int64?, shared: [SidebarRoom], directs: [SidebarDirect], placeholders: [SidebarUser], canCreateRooms: Bool, flash: RailsFlash, pageTitle: String = "Campfire", pageHead: String = "", pageNav: String = "", pageContent: String = "", pageFooter: String = "", pageBodyClass: String = "", lazySidebar: Bool = false) -> String {
+    static func render(user: SignedInUser, account: SidebarAccount, lastRoomID: Int64?, shared: [SidebarRoom], directs: [SidebarDirect], placeholders: [SidebarUser], canCreateRooms: Bool, flash: RailsFlash, pageTitle: String = "Campfire", pageHead: String = "", pageNav: String = "", pageContent: String = "", pageFooter: String = "", pageBodyClass: String = "", lazySidebar: Bool = false, pageSidebarContent: String? = nil) -> String {
         var buffer = RenderBuffer()
         let logoURL = "/account/logo?v=\(account.logoVersion)"
         buffer.write("<!DOCTYPE html><html><head><title>\(erbEscape(pageTitle))</title>")
@@ -47,14 +47,16 @@ enum SidebarRenderer {
             let style = alert ? "--flash-background: var(--color-negative)" : ""
             buffer.write("<div class=\"flash\" data-controller=\"element-removal\" data-action=\"animationend->element-removal#remove\"><div class=\"flash__inner shadow\" style=\"\(style)\"><img aria-hidden=\"true\" class=\"colorize--white\" height=\"24\" src=\"\(icon)\" width=\"24\"></span></div><span class=\"for-screen-reader\" role=\"alert\" aria-atomic=\"true\">\(erbEscape(notice))</span></div>")
         }
-        if pageContent.isEmpty {
+        if let pageSidebarContent {
+            buffer.write("<main id=\"main-content\">\(pageContent)<footer id=\"footer\">\(pageFooter)</footer></main><aside id=\"sidebar\" data-controller=\"toggle-class\" data-toggle-class-toggle-class=\"open\">\(pageSidebarContent)</aside>")
+        } else if pageContent.isEmpty {
             buffer.write("<main id=\"main-content\"><turbo-frame data-action=\"presence:present@window->rooms-list#read read-rooms:read->rooms-list#read turbo:frame-load->rooms-list#loaded refresh-room:visible@window->turbo-frame#reload\" data-controller=\"rooms-list read-rooms turbo-frame\" data-rooms-list-unread-class=\"unread\" data-turbo-permanent=\"true\" id=\"user_sidebar\" target=\"_top\">")
         } else if lazySidebar {
             buffer.write("<main id=\"main-content\">\(pageContent)<footer id=\"footer\">\(pageFooter)</footer></main><aside id=\"sidebar\" data-controller=\"toggle-class\" data-toggle-class-toggle-class=\"open\"><turbo-frame data-action=\"presence:present@window-&gt;rooms-list#read read-rooms:read-&gt;rooms-list#read turbo:frame-load-&gt;rooms-list#loaded refresh-room:visible@window-&gt;turbo-frame#reload\" data-controller=\"rooms-list read-rooms turbo-frame\" data-rooms-list-unread-class=\"unread\" data-turbo-permanent=\"true\" id=\"user_sidebar\" src=\"/users/me/sidebar\" target=\"_top\">")
         } else {
             buffer.write("<main id=\"main-content\">\(pageContent)<footer id=\"footer\">\(pageFooter)</footer></main><aside id=\"sidebar\" data-controller=\"toggle-class\" data-toggle-class-toggle-class=\"open\"><turbo-frame data-action=\"presence:present@window->rooms-list#read read-rooms:read->rooms-list#read turbo:frame-load->rooms-list#loaded refresh-room:visible@window->turbo-frame#reload\" data-controller=\"rooms-list read-rooms turbo-frame\" data-rooms-list-unread-class=\"unread\" data-turbo-permanent=\"true\" id=\"user_sidebar\" target=\"_top\">")
         }
-        if !lazySidebar {
+        if pageSidebarContent == nil && !lazySidebar {
         let secret = ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base"
         let streamSigner = RailsTurboStreamSigner(secretKeyBase: secret)
         let userGID = Data("gid://campfire/User/\(user.id)".utf8).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
@@ -72,10 +74,10 @@ enum SidebarRenderer {
         buffer.write("</div><button class=\"btn sidebar__toggle\" data-action=\"toggle-class#toggle\"><img aria-hidden=\"true\" height=\"20\" src=\"\(assetPath("menu.svg"))\" width=\"20\"><span class=\"for-screen-reader\">Open menu</span></button></div><div class=\"flex align-end sidebar__tools gap justify-end\"><a class=\"btn avatar flex-item-no-shrink sidebar__tool\" href=\"/users/me/profile\"><img aria-hidden=\"true\" height=\"48\" src=\"\(avatarPath(user))\" style=\"view-transition-name: avatar-\(user.id)\" width=\"48\"><span class=\"for-screen-reader\">My Settings</span></a><a class=\"btn align-center gap txt-reversed sidebar__tool\" href=\"/account/edit\"><img aria-hidden=\"true\" height=\"20\" src=\"\(assetPath("settings.svg"))\" style=\"view-transition-name: account-settings\" width=\"20\"><span class=\"for-screen-reader\">Account Settings</span></a></div></turbo-frame>")
         if pageContent.isEmpty {
             buffer.write("<footer id=\"footer\"></footer></main><aside id=\"sidebar\" data-controller=\"toggle-class\" data-toggle-class-toggle-class=\"open\"></aside>")
-        } else {
+        } else if pageSidebarContent == nil {
             buffer.write("</aside>")
         }
-        } else {
+        } else if pageSidebarContent == nil {
             buffer.write("</turbo-frame></aside>")
         }
         buffer.write("<dialog class=\"lightbox\" aria-label=\"Image Viewer (Press escape to close)\" data-lightbox-target=\"dialog\" data-action=\"close->lightbox#reset\"><img src=\"\" class=\"lightbox__image\" data-lightbox-target=\"zoomedImage\"><form method=\"dialog\" class=\"lightbox__btn\"><button class=\"btn\"><img aria-hidden=\"true\" src=\"\(assetPath("remove.svg"))\"><span class=\"for-screen-reader\">Close image viewer</span></button></form><a href=\"\" class=\"lightbox__btn--download btn hide-in-ios-pwa\" data-lightbox-target=\"download\"><img aria-hidden=\"true\" src=\"\(assetPath("download.svg"))\"><span class=\"for-screen-reader\">Download file</span></a><button class=\"lightbox__btn--share btn\" data-action=\"web-share#share\" data-controller=\"web-share\" data-lightbox-target=\"share\" data-web-share-files-value=\"\"><img aria-hidden=\"true\" src=\"\(assetPath("share.svg"))\"><span class=\"for-screen-reader\">Share file</span></button></dialog><a href=\"https://once.com\" id=\"app-logo\" target=\"_blank\" aria-label=\"Once software from 37signals home page\"><img alt=\"Campfire logo\" height=\"216\" src=\"\(assetPath("campfire-icon.png"))\" width=\"256\"></a></body></html>")

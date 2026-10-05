@@ -4,7 +4,7 @@ import HTTPTypes
 import Hummingbird
 import NIOCore
 
-private struct RoomMessage: Sendable {
+struct RoomMessage: Sendable {
     let id: Int64
     let clientMessageID: String
     let roomID: Int64
@@ -20,7 +20,7 @@ private struct RoomMessage: Sendable {
     let boosts: [RoomBoost]
 }
 
-private struct RoomBoost: Sendable {
+struct RoomBoost: Sendable {
     let id: Int64
     let messageID: Int64
     let content: String
@@ -30,7 +30,7 @@ private struct RoomBoost: Sendable {
     let creatorTitle: String
 }
 
-private struct MessageVersion: Sendable {
+struct MessageVersion: Sendable {
     let id: Int64
     let createdAt: String
     let updatedAt: String
@@ -189,7 +189,7 @@ private func loadSidebarData(database: SQLiteDatabase, user: SignedInUser) async
     }.value
 }
 
-private func loadMessage(_ connection: SQLiteConnection, version: MessageVersion, roomName: String, roomID: Int64) throws -> RoomMessage {
+func loadMessage(_ connection: SQLiteConnection, version: MessageVersion, roomName: String, roomID: Int64) throws -> RoomMessage {
     let row = try connection.firstRow("SELECT m.creator_id, u.name, u.updated_at, COALESCE(t.body,''), m.created_at, m.client_message_id, u.bio FROM messages m INNER JOIN users u ON u.id=m.creator_id LEFT JOIN action_text_rich_texts t ON t.record_type='Message' AND t.record_id=m.id AND t.name='body' WHERE m.id=? LIMIT 1", bindings: [.integer(version.id)])
     let creatorID = row?.integer(0) ?? 0
     let boosts = try connection.rows("SELECT b.id, b.message_id, b.content, u.id, u.name, u.updated_at, u.bio FROM boosts b INNER JOIN users u ON u.id=b.booster_id WHERE b.message_id=? ORDER BY b.created_at, b.id", bindings: [.integer(version.id)]).compactMap { row -> RoomBoost? in
@@ -200,12 +200,12 @@ private func loadMessage(_ connection: SQLiteConnection, version: MessageVersion
     return RoomMessage(id: version.id, clientMessageID: row?.string(5) ?? String(version.id), roomID: roomID, createdAt: version.createdAt, updatedAt: version.updatedAt, createdAtMilliseconds: version.createdAtMilliseconds, creatorID: creatorID, creatorName: row?.string(1) ?? "", creatorUpdatedAt: row?.string(2) ?? "", creatorTitle: [row?.string(1), row?.string(6)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " – "), roomName: roomName, body: row?.string(3) ?? "", boosts: boosts)
 }
 
-private func messageFragmentKey(_ message: MessageVersion) -> String {
+func messageFragmentKey(_ message: MessageVersion) -> String {
     let micros = timestampMicroseconds(message.updatedAt)
     return "views/messages/_message:\(messageTemplateDigest)/messages/\(message.id)-\(micros)/presentation-v3"
 }
 
-private func roomAsset(_ logicalName: String) -> String {
+func roomAsset(_ logicalName: String) -> String {
     if let exact = AssetManifest.assets[logicalName] { return exact }
     let basename = URL(fileURLWithPath: logicalName).lastPathComponent
     guard let asset = AssetManifest.assets[basename], logicalName.contains("/") else {
@@ -216,12 +216,12 @@ private func roomAsset(_ logicalName: String) -> String {
 
 private let messageTemplateDigest = SHA256.hash(data: Data("messages/_message|presentation|actions|boosts|action-text-renderer-v1".utf8)).map { String(format: "%02x", $0) }.joined().prefix(32)
 
-private func isoTimestamp(_ value: String) -> String {
+func isoTimestamp(_ value: String) -> String {
     let normalized = value.replacingOccurrences(of: " ", with: "T")
     return normalized.hasSuffix("Z") ? normalized : normalized + "Z"
 }
 
-private func timestampMicroseconds(_ value: String) -> Int64 {
+func timestampMicroseconds(_ value: String) -> Int64 {
     let normalized = value.replacingOccurrences(of: " ", with: "T")
     let iso = ISO8601DateFormatter()
     iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -231,7 +231,7 @@ private func timestampMicroseconds(_ value: String) -> Int64 {
     return 0
 }
 
-private func render(message: RoomMessage) -> String {
+func render(message: RoomMessage) -> String {
     let secret = ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base"
     let avatarToken = RailsSignedID(secretKeyBase: secret).generate(model: "User", id: Int(message.creatorID), purpose: "avatar")
     let avatar = "/users/\(avatarToken)/avatar?v=\(message.creatorUpdatedAt.filter(\.isNumber).prefix(14))"
