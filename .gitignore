@@ -42,3 +42,8 @@ app/assets/builds/*
 
 # Ignore our exported zipfiles
 /*.zip
+
+# Swift
+/.build
+/.swiftpm
+/Package.resolved.bak
