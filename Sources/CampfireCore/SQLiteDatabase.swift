@@ -154,6 +154,28 @@ public final class SQLiteConnection: @unchecked Sendable {
         return SQLiteRow(values: values)
     }
 
+    public func rows(_ sql: String, bindings: [SQLiteValue] = []) throws -> [SQLiteRow] {
+        lock.lock(); defer { lock.unlock() }
+        let statement = try prepared(sql, bindings: bindings)
+        defer { sqlite3_reset(statement); sqlite3_clear_bindings(statement) }
+        var result: [SQLiteRow] = []
+        while true {
+            let status = sqlite3_step(statement)
+            if status == SQLITE_DONE { return result }
+            guard status == SQLITE_ROW else { throw failure(status) }
+            var values: [SQLiteValue] = []
+            values.reserveCapacity(Int(sqlite3_column_count(statement)))
+            for index in 0..<sqlite3_column_count(statement) {
+                switch sqlite3_column_type(statement, index) {
+                case SQLITE_INTEGER: values.append(.integer(sqlite3_column_int64(statement, index)))
+                case SQLITE_TEXT: values.append(.text(String(cString: sqlite3_column_text(statement, index))))
+                default: values.append(.null)
+                }
+            }
+            result.append(SQLiteRow(values: values))
+        }
+    }
+
     public func scalarInt(_ sql: String) throws -> Int64? { try firstRow(sql)?.integer(0) }
 
     fileprivate func configure(queryOnly: Bool) throws {

@@ -1,9 +1,13 @@
 FROM swift:6.4-noble AS build
 WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 COPY Package.swift Package.resolved ./
 COPY Sources ./Sources
 COPY Tests ./Tests
 COPY Vendor ./Vendor
+COPY Scripts ./Scripts
+COPY reference ./reference
+RUN python3 Scripts/generate-asset-manifest.py
 RUN SWIFTPM_MAXIMUM_CONCURRENT_OPERATIONS=2 swift build -j 2 -c release
 
 FROM ubuntu:noble AS runtime
