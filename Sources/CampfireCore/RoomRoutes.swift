@@ -73,6 +73,82 @@ final class MessageFragmentCache: @unchecked Sendable {
 }
 
 func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, fragmentCache: MessageFragmentCache) {
+    router.get("/rooms/:id/messages") { request, context async throws -> Response in
+        guard let session = try await SessionPipeline.load(request, database: database) else {
+            var response = Response(status: .found)
+            response.headers[.location] = "/session/new"
+            return response
+        }
+
+        let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
+        let beforeID = request.uri.queryParameters["before"].flatMap { Int64($0) }
+        let page = try await Task.detached { () throws -> (String?, [MessageVersion]) in
+            try database.read { connection in
+                let room = try connection.firstRow("SELECT r.name FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
+                guard let roomName = room?.string(0) else { return (nil, []) }
+
+                let messages: [SQLiteRow]
+                if let beforeID {
+                    guard let timestamp = try connection.firstRow("SELECT created_at FROM messages WHERE id=? AND room_id=? LIMIT 1", bindings: [.integer(beforeID), .integer(roomID)])?.string(0) else {
+                        return (roomName, [])
+                    }
+                    messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at, CAST(strftime('%s', created_at) AS INTEGER) * 1000 + CAST(substr(created_at || '.000', 21, 3) AS INTEGER) FROM messages WHERE room_id=? AND created_at < ? ORDER BY created_at DESC LIMIT 40", bindings: [.integer(roomID), .text(timestamp)])
+                } else {
+                    messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at, CAST(strftime('%s', created_at) AS INTEGER) * 1000 + CAST(substr(created_at || '.000', 21, 3) AS INTEGER) FROM (SELECT id, client_message_id, created_at, updated_at FROM messages WHERE room_id=? ORDER BY created_at DESC LIMIT 40) ORDER BY created_at ASC", bindings: [.integer(roomID)])
+                }
+                let queriedVersions = messages.compactMap { row -> MessageVersion? in
+                    guard let id = row.integer(0), let created = row.string(2), let updated = row.string(3) else { return nil }
+                    return MessageVersion(id: id, createdAt: created, updatedAt: updated, createdAtMilliseconds: row.integer(4) ?? 0)
+                }
+                let versions = beforeID == nil ? queriedVersions : Array(queriedVersions.reversed())
+                return (roomName, versions)
+            }
+        }.value
+
+        guard let roomName = page.0 else {
+            var response = Response(status: .found)
+            response.headers[.location] = "/"
+            if let cookie = SessionPipeline.alertCookie("Room not found or inaccessible") {
+                response.headers.append(HTTPField(name: .setCookie, value: cookie))
+            }
+            return response
+        }
+        guard !page.1.isEmpty else { return Response(status: .noContent) }
+
+        let output = try await Task.detached {
+            try database.read { connection -> String in
+                var buffer = RenderBuffer()
+                for version in page.1 {
+                    let key = messageFragmentKey(version)
+                    if let cached = fragmentCache.value(for: key) {
+                        buffer.write(cached)
+                    } else {
+                        let message = try loadMessage(connection, version: version, roomName: roomName, roomID: roomID)
+                        buffer.write(fragmentCache.insert(render(message: message), for: key))
+                    }
+                }
+                return buffer.finish()
+            }
+        }.value
+
+        let cacheKeyVersions = page.1.map { "messages/\($0.id)-\(timestampMicroseconds($0.updatedAt))" }.joined(separator: "/")
+        let validator = etag(for: "\(cacheKeyVersions)/messages/index")
+        let latestModified = page.1.map { timestampMicroseconds($0.updatedAt) }.max() ?? 0
+        let lastModified = httpDate(Date(timeIntervalSince1970: Double(latestModified) / 1_000_000))
+        var response: Response
+        if ifNoneMatch(request.headers[HTTPField.Name("if-none-match")!], matches: validator) {
+            response = Response(status: .notModified)
+        } else {
+            response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: output)))
+            response.headers[.contentType] = "text/html; charset=utf-8"
+        }
+        response.headers[HTTPField.Name("etag")!] = validator
+        response.headers[HTTPField.Name("last-modified")!] = lastModified
+        response.headers[HTTPField.Name("cache-control")!] = "max-age=0, private, must-revalidate"
+        SessionPipeline.appendRefreshCookie(session, to: &response)
+        return response
+    }
+
     router.get("/rooms/:id") { request, context async throws -> Response in
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
@@ -159,6 +235,15 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         SessionPipeline.appendRefreshCookie(session, to: &response)
         if let flashCookie = flash.setCookie { response.headers.append(HTTPField(name: .setCookie, value: flashCookie)) }
         return response
+    }
+}
+
+private func ifNoneMatch(_ header: String?, matches validator: String) -> Bool {
+    guard let header else { return false }
+    let target = validator.replacingOccurrences(of: "W/", with: "")
+    return header.split(separator: ",").contains { item in
+        let candidate = item.trimmingCharacters(in: .whitespaces)
+        return candidate == "*" || candidate.replacingOccurrences(of: "W/", with: "") == target
     }
 }
 
