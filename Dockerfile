@@ -4,7 +4,7 @@ COPY Package.swift Package.resolved ./
 COPY Sources ./Sources
 COPY Tests ./Tests
 COPY Vendor ./Vendor
-RUN SWIFTPM_MAX_CONCURRENT_OPERATIONS=2 swift build -j 2 -c release
+RUN SWIFTPM_MAXIMUM_CONCURRENT_OPERATIONS=2 swift build -j 2 -c release
 
 FROM ubuntu:noble AS runtime
 RUN apt-get update \
