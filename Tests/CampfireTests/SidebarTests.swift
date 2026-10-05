@@ -52,7 +52,7 @@ final class SidebarTests: XCTestCase {
                 XCTAssertTrue(html.contains("/assets/"))
                 XCTAssertEqual(try database.read { try $0.scalarInt("SELECT COUNT(*) FROM sessions") ?? 0 }, sessionCount)
                 XCTAssertNil(response.headers[HTTPField.Name("set-cookie")!], "an ordinary recent read does not write cookies")
-                let css = try await client.execute(uri: AssetManifest.stylesheetPath, method: .get)
+                let css = try await client.execute(uri: "/assets/flash-a561c1e5.css", method: .get)
                 XCTAssertEqual(css.status.code, 200)
                 XCTAssertEqual(css.headers[.contentType], "text/css; charset=utf-8")
             }

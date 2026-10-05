@@ -21,15 +21,18 @@ let package = Package(
             publicHeadersPath: ".",
             cSettings: [.define("SQLITE_ENABLE_FTS5"), .define("SQLITE_THREADSAFE", to: "2")]
         ),
+        .systemLibrary(name: "CZlib", pkgConfig: "zlib"),
         .target(
             name: "CampfireCore",
             dependencies: [
                 "CSQLite",
+                "CZlib",
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "SwiftSoup", package: "SwiftSoup"),
-            ]
+            ],
+            resources: [.copy("Resources")]
         ),
         .executableTarget(
             name: "Campfire",
@@ -39,6 +42,7 @@ let package = Package(
             name: "CampfireTests",
             dependencies: [
                 "CampfireCore",
+                "CZlib",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ],
             resources: [.copy("Fixtures")]
