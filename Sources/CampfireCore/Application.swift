@@ -10,10 +10,12 @@ public func makeApplication(
     avatarFilesPath: String = ProcessInfo.processInfo.environment["CAMPFIRE_FILES_PATH"] ?? "/rails/storage/files"
 ) throws -> Application<RouterResponder<BasicRequestContext>> {
     let database = try suppliedDatabase ?? SQLiteDatabase(path: databasePath)
+    let fragmentCache = MessageFragmentCache(maxBytes: Int(ProcessInfo.processInfo.environment["FRAGMENT_CACHE_BYTES"] ?? "33554432") ?? 33_554_432)
     let router = Router()
     router.addMiddleware { GzipMiddleware() }
     installLoginRoutes(on: router, database: database)
     installSidebarRoutes(on: router, database: database)
+    installRoomRoutes(on: router, database: database, fragmentCache: fragmentCache)
     installAvatarRoutes(on: router, database: database, filesPath: avatarFilesPath)
     router.get("/assets/flash-a561c1e5.css") { _, _ -> Response in
         var response = Response(status: .ok, body: .init(byteBuffer: StaticAssets.flashStylesheet))

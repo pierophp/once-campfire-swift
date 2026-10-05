@@ -90,7 +90,15 @@ class CanonicalHTML(HTMLParser):
         if self.skip_depth:
             return
         if self.raw_text_tags:
-            text = mask_values(data)
+            if self.raw_text_tags[-1] == "script":
+                try:
+                    # Import maps are JSON: runtimes pretty-print the same mapping differently.
+                    # Compare their meaning while preserving the script contents as a single node.
+                    text = mask_values(json.dumps(json.loads(data), sort_keys=True, separators=(",", ":")))
+                except (json.JSONDecodeError, TypeError):
+                    text = mask_values(data)
+            else:
+                text = mask_values(data)
         else:
             text = mask_values(re.sub(r"[\t\n\f\r ]+", " ", data).strip())
         if text:
@@ -278,14 +286,19 @@ def main() -> int:
                 captures[name].append(normalized_capture(sidebar))
                 if sidebar["status"] >= 400:
                     raise RuntimeError(f"{name} sidebar returned {sidebar['status']}")
+                room_id = labels["rooms.watercooler"]
+                room = request(base, "GET", f"/rooms/{room_id}", {"Cookie": cookie})
+                captures[name].append(normalized_capture(room))
+                if room["status"] >= 400:
+                    raise RuntimeError(f"{name} room page returned {room['status']}")
             baseline = captures["rust"]
             failures = []
             for name in labels_names:
                 if name == "rust":
                     continue
-                # Login is the harness precondition. Its template and redirect envelope are outside
-                # the current route's parity surface; compare only the implemented sidebar response.
-                for index, step in ((2, "GET /users/me/sidebar"),):
+                # Login is the harness precondition. Compare only the completed sidebar and room
+                # page surfaces; login's current template is not part of either route contract.
+                for index, step in ((2, "GET /users/me/sidebar"), (3, f"GET /rooms/{labels['rooms.watercooler']}")):
                     left, right = baseline[index], captures[name][index]
                     for field in ("status", "headers", "cookies_set", "body"):
                         if right[field] != left[field]:
