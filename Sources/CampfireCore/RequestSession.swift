@@ -77,6 +77,15 @@ enum SessionPipeline {
         return RailsFlash(notice: notice, alert: alert, setCookie: "_campfire_session=\(escaped); path=/; httponly; samesite=lax")
     }
 
+    static func alertCookie(_ alert: String) -> String? {
+        let flash: [String: Any] = ["flash": ["discard": [], "flashes": ["alert": alert]]]
+        guard let bytes = try? JSONSerialization.data(withJSONObject: flash, options: [.sortedKeys]),
+              let json = String(data: bytes, encoding: .utf8),
+              let encrypted = try? sessionEncryptor().encryptCookie(serializedValue: json, purpose: "cookie._campfire_session") else { return nil }
+        let escaped = encrypted.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~")) ?? encrypted
+        return "_campfire_session=\(escaped); path=/; httponly; samesite=lax"
+    }
+
     private static func decodeRailsSession(_ value: String) -> [String: Any]? {
         guard let data = sessionEncryptor().decrypt(value),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

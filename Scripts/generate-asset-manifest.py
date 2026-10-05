@@ -30,6 +30,12 @@ LOAD_PATHS = [
     (REFERENCE / "vendor/javascript", "nested"),
 ]
 
+# A source checkout can be built without the reference submodule. Keep the checked-in manifest
+# (which is the documented fallback) intact until its source assets or import map are available.
+if not (REFERENCE / "config/importmap.rb").is_file() and not any(path.exists() for path, _ in LOAD_PATHS):
+    print("reference assets are absent; using the checked-in asset manifest")
+    raise SystemExit(0)
+
 paths: dict[str, str] = {}
 for load_path, shape in LOAD_PATHS:
     for asset in sorted(load_path.rglob("*")) if load_path.exists() else []:
