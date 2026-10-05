@@ -23,3 +23,7 @@ docker run --rm \
 ```
 
 The image listens on plain HTTP at `HTTP_PORT` (default `80`), opens `/rails/storage/db/production.sqlite3`, and responds to `GET /up`. It does not select a container `USER`, so the benchmark harness can pass its host uid. The NIO event-loop group uses the process's allowed CPU list, then the cgroup cpuset, to size its threads.
+
+## Response compression
+
+The HTTP middleware negotiates `gzip` and `identity` using Rack::Deflater-compatible quality ordering, adds `Vary: Accept-Encoding`, and returns 406 when neither supported encoding is acceptable. It skips bodyless statuses, empty bodies, `Cache-Control: no-transform`, and already encoded responses. Gzip uses the system zlib implementation at level 6. A SHA-256 keyed LRU retains compressed bodies within a 16 MiB byte budget; a single entry larger than 4 MiB is not cached. The `swift-identity` benchmark sends `Accept-Encoding: identity` to exercise the uncompressed response path.
