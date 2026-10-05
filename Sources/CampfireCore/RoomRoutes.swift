@@ -73,6 +73,110 @@ final class MessageFragmentCache: @unchecked Sendable {
 }
 
 func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, fragmentCache: MessageFragmentCache) {
+    router.post("/rooms/:id/messages") { request, context async throws -> Response in
+        let remoteAddress = request.headers[HTTPField.Name("x-forwarded-for")!]?.split(separator: ",").first.map(String.init) ?? "127.0.0.1"
+        let banned = try await Task.detached {
+            try database.read { connection in
+                try connection.firstRow("SELECT 1 FROM bans WHERE ip_address=? LIMIT 1", bindings: [.text(remoteAddress)]) != nil
+            }
+        }.value
+        if banned { return Response(status: .tooManyRequests) }
+
+        guard let session = try await SessionPipeline.load(request, database: database) else {
+            var response = Response(status: .found)
+            response.headers[.location] = "/session/new"
+            return response
+        }
+        guard allowsSameOrigin(request) else { return Response(status: .init(code: 422)) }
+        guard (request.headers[.accept] ?? "").contains("text/vnd.turbo-stream.html") else {
+            return Response(status: .init(code: 406))
+        }
+
+        let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
+        let room = try await Task.detached {
+            try database.read { connection in
+                try connection.firstRow("SELECT r.id, r.name, r.type FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
+            }
+        }.value
+        guard let room, let storedRoomID = room.integer(0), let roomType = room.string(2) else {
+            var response = Response(status: .found)
+            response.headers[.location] = "/"
+            if let cookie = SessionPipeline.alertCookie("Room not found or inaccessible") {
+                response.headers.append(HTTPField(name: .setCookie, value: cookie))
+            }
+            return response
+        }
+
+        var request = request
+        let form = formParameters(try await request.collectBody(upTo: 64 * 1024))
+        let body = form["message[body]"]
+        let clientMessageID = form["message[client_message_id]"]?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? UUID().uuidString.lowercased()
+        let createdAt = sqliteTimestamp()
+        let renderer = ActionTextRenderer(secretKeyBase: ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base")
+        let plainText = body.map(renderer.plainText) ?? ""
+        let messageID = try await Task.detached {
+            try database.write { connection, hooks in
+                let inserted = try connection.firstRow("INSERT INTO messages (client_message_id, created_at, creator_id, room_id, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id", bindings: [.text(clientMessageID), .text(createdAt), .integer(session.user.id), .integer(storedRoomID), .text(createdAt)])
+                guard let id = inserted?.integer(0) else { throw SQLiteError.query("Message insert did not return its id") }
+                if let body {
+                    let bodyAt = sqliteTimestamp()
+                    try connection.execute("INSERT INTO action_text_rich_texts (body, created_at, name, record_id, record_type, updated_at) VALUES (?, ?, 'body', ?, 'Message', ?)", bindings: [.text(body), .text(bodyAt), .integer(id), .text(bodyAt)])
+                    try connection.execute("UPDATE messages SET updated_at=? WHERE id=?", bindings: [.text(sqliteTimestamp()), .integer(id)])
+                }
+                try connection.execute("UPDATE rooms SET updated_at=? WHERE id=?", bindings: [.text(sqliteTimestamp()), .integer(storedRoomID)])
+
+                hooks.append { writer in
+                    try writer.execute("INSERT INTO message_search_index(rowid, body) VALUES (?, ?)", bindings: [.integer(id), .text(plainText)])
+                    try writer.execute("UPDATE memberships SET unread_at=?, updated_at=? WHERE room_id=? AND involvement!='invisible' AND (connected_at IS NULL OR connected_at < datetime('now', '-1 minute')) AND user_id!=?", bindings: [.text(createdAt), .text(sqliteTimestamp()), .integer(storedRoomID), .integer(session.user.id)])
+                }
+                return id
+            }
+        }.value
+
+        // Rails enqueues this after the post-commit unread updates. Delivery is intentionally a
+        // no-op because the parity seed has no live push endpoints.
+        MessagePushJobQueue.enqueue(roomID: storedRoomID, messageID: messageID)
+
+        let version = try await Task.detached {
+            try database.read { connection -> MessageVersion in
+                guard let row = try connection.firstRow("SELECT created_at, updated_at FROM messages WHERE id=?", bindings: [.integer(messageID)]),
+                      let created = row.string(0), let updated = row.string(1) else {
+                    throw SQLiteError.query("Inserted message was not found after commit")
+                }
+                return MessageVersion(id: messageID, createdAt: created, updatedAt: updated, createdAtMilliseconds: timestampMicroseconds(created) / 1000)
+            }
+        }.value
+        let rendered = try await Task.detached {
+            try database.read { connection -> String in
+                let message = try loadMessage(connection, version: version, roomName: room.string(1) ?? "", roomID: storedRoomID)
+                return fragmentCache.insert(render(message: message), for: messageFragmentKey(version))
+            }
+        }.value
+
+        // The room's message callback reads the memberships used for broadcasts and finds any
+        // bot webhook recipients after the fragment has been rendered into cache.
+        _ = try await Task.detached {
+            try database.read { connection in
+                try connection.rows("SELECT id, user_id, unread_at FROM memberships WHERE room_id=? AND involvement!='invisible' AND unread_at IS NOT NULL", bindings: [.integer(storedRoomID)])
+            }
+        }.value
+        _ = try await Task.detached {
+            try database.read { connection in
+                try connection.rows("SELECT DISTINCT u.id FROM users u INNER JOIN memberships m ON m.user_id=u.id WHERE m.room_id=? AND u.status=0 AND u.role=2", bindings: [.integer(storedRoomID)]).compactMap { $0.integer(0) }
+            }
+        }.value
+
+        let roomKind = roomType == "Rooms::Direct" ? "rooms_direct" : (roomType == "Rooms::Closed" ? "rooms_closed" : "rooms_open")
+        let stream = "<turbo-stream action=\"append\" target=\"messages_\(roomKind)_\(storedRoomID)\"><template>\(rendered)</template></turbo-stream>"
+        var response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: stream)))
+        response.headers[.contentType] = "text/vnd.turbo-stream.html; charset=utf-8"
+        response.headers[HTTPField.Name("cache-control")!] = "max-age=0, private, must-revalidate"
+        response.headers[HTTPField.Name("etag")!] = etag(for: stream)
+        response.headers[.vary] = "Accept"
+        SessionPipeline.appendRefreshCookie(session, to: &response)
+        return response
+    }
+
     router.get("/rooms/:id/messages") { request, context async throws -> Response in
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
@@ -245,6 +349,27 @@ private func ifNoneMatch(_ header: String?, matches validator: String) -> Bool {
         let candidate = item.trimmingCharacters(in: .whitespaces)
         return candidate == "*" || candidate.replacingOccurrences(of: "W/", with: "") == target
     }
+}
+
+private enum MessagePushJobQueue {
+    private static let queue = DispatchQueue(label: "campfire.message-push-jobs", qos: .utility)
+
+    static func enqueue(roomID: Int64, messageID: Int64) {
+        queue.async { _ = (roomID, messageID) }
+    }
+}
+
+private func sqliteTimestamp() -> String {
+    let now = Date()
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
+    let micros = Int((now.timeIntervalSince1970 - floor(now.timeIntervalSince1970)) * 1_000_000)
+    return String(format: "%04d-%02d-%02d %02d:%02d:%02d.%06d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0, parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0, micros)
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
 }
 
 private func loadSidebarData(database: SQLiteDatabase, user: SignedInUser) async throws -> SidebarData {

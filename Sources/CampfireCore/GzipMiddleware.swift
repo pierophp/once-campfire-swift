@@ -63,7 +63,7 @@ private func hasWord(_ value: String, _ word: String) -> Bool {
 private func addVaryAcceptEncoding(to headers: inout HTTPFields) {
     let values = headers[.vary]?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? []
     guard !values.contains(where: { $0 == "*" || $0.caseInsensitiveCompare("Accept-Encoding") == .orderedSame }) else { return }
-    headers[.vary] = (values + ["Accept-Encoding"]).joined(separator: ", ")
+    headers[.vary] = (values + ["Accept-Encoding"]).joined(separator: ",")
 }
 
 private func parseAcceptEncoding(_ header: String) -> [(String, Double)] {

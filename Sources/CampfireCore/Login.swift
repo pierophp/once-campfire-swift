@@ -75,7 +75,7 @@ func installLoginRoutes(on router: Router<BasicRequestContext>, database: SQLite
     }
 }
 
-private func allowsSameOrigin(_ request: Request) -> Bool {
+func allowsSameOrigin(_ request: Request) -> Bool {
     let origin = request.headers[.origin]
     if let origin {
         if origin == "null" { return false }
@@ -91,7 +91,7 @@ private func allowsSameOrigin(_ request: Request) -> Bool {
     }
 }
 
-private func formParameters(_ buffer: ByteBuffer) -> [String: String] {
+func formParameters(_ buffer: ByteBuffer) -> [String: String] {
     let body = buffer.getString(at: buffer.readerIndex, length: buffer.readableBytes) ?? ""
     let components = URLComponents(string: "?\(body)")
     return Dictionary(components?.queryItems?.compactMap { item in item.value.map { (item.name, $0) } } ?? [], uniquingKeysWith: { _, last in last })

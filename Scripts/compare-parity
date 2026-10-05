@@ -36,6 +36,7 @@ MASK_REASONS = {
     "Set-Cookie values": "Rails encrypted session cookies use random nonces and session tokens are independently random; cookie names and attributes remain compared",
     "ETag digests": "each server hashes its raw HTML bytes before parity canonicalization; layout whitespace and fingerprinted asset paths legitimately change the digest, so the weak validator and 32-hex digest shape remain checked while only the digest value is normalized",
     "ISO timestamps": "the seed is shared, but each server renders request-time timestamps from its own clock",
+    "posted message ids and timestamps": "the HTTP post allocates a database id and transaction timestamps on each server; those generated values are not shared inputs",
     "asset digests": "Rails Propshaft and the Swift build generate runtime-specific digests for the same named asset; the path and extension remain compared",
 }
 
@@ -50,11 +51,12 @@ class CanonicalHTML(HTMLParser):
     VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
     CSRF_NAMES = {"csrf-token", "csrf-param", "authenticity_token"}
 
-    def __init__(self) -> None:
+    def __init__(self, mask_posted_message: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.skip_depth = 0
         self.raw_text_tags: list[str] = []
+        self.mask_posted_message = mask_posted_message
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_dict = dict(attrs)
@@ -68,7 +70,9 @@ class CanonicalHTML(HTMLParser):
             if value is None:
                 normalized.append((key, None))
                 continue
-            value = mask_values(value)
+            if self.mask_posted_message and key in {"data-message-id", "data-message-timestamp", "data-message-updated-at", "data-sort-value"}:
+                value = "<posted-value>"
+            value = mask_values(value, mask_posted_message=self.mask_posted_message)
             normalized.append((key, value))
         attr_text = "".join(f" {key}" if value is None or value == "" else f" {key}={json.dumps(value, ensure_ascii=False)}" for key, value in sorted(normalized))
         self.parts.append(f"<{tag}{attr_text}>")
@@ -94,29 +98,32 @@ class CanonicalHTML(HTMLParser):
                 try:
                     # Import maps are JSON: runtimes pretty-print the same mapping differently.
                     # Compare their meaning while preserving the script contents as a single node.
-                    text = mask_values(json.dumps(json.loads(data), sort_keys=True, separators=(",", ":")))
+                    text = mask_values(json.dumps(json.loads(data), sort_keys=True, separators=(",", ":")), mask_posted_message=self.mask_posted_message)
                 except (json.JSONDecodeError, TypeError):
-                    text = mask_values(data)
+                    text = mask_values(data, mask_posted_message=self.mask_posted_message)
             else:
-                text = mask_values(data)
+                text = mask_values(data, mask_posted_message=self.mask_posted_message)
         else:
-            text = mask_values(re.sub(r"[\t\n\f\r ]+", " ", data).strip())
+            text = mask_values(re.sub(r"[\t\n\f\r ]+", " ", data).strip(), mask_posted_message=self.mask_posted_message)
         if text:
             self.parts.append(text)
 
     def handle_comment(self, data: str) -> None:
         if not self.skip_depth and data.strip():
-            self.parts.append(f"<!-- {mask_values(data.strip())} -->")
+            self.parts.append(f"<!-- {mask_values(data.strip(), mask_posted_message=self.mask_posted_message)} -->")
 
 
-def mask_values(value: str) -> str:
+def mask_values(value: str, *, mask_posted_message: bool = False) -> str:
     value = ISO_TIME.sub("<timestamp>", value)
+    if mask_posted_message:
+        value = re.sub(r'(/messages/)\d+', r'\1<posted-id>', value)
+        value = re.sub(r'(/rooms/\d+/@)\d+', r'\1<posted-id>', value)
     return ASSET_DIGEST.sub(lambda m: f"{m.group('name')}-<digest>{m.group('ext')}", value)
 
 
-def normalize_body(body: bytes, content_type: str) -> str:
-    if content_type.lower().startswith("text/html") or b"<html" in body[:512].lower() or b"<!doctype" in body[:512].lower():
-        parser = CanonicalHTML()
+def normalize_body(body: bytes, content_type: str, *, mask_posted_message: bool = False) -> str:
+    if content_type.lower().startswith(("text/html", "text/vnd.turbo-stream.html")) or b"<html" in body[:512].lower() or b"<!doctype" in body[:512].lower():
+        parser = CanonicalHTML(mask_posted_message=mask_posted_message)
         parser.feed(body.decode("utf-8", errors="replace"))
         return "\n".join(parser.parts) + "\n"
     return body.decode("utf-8", errors="replace")
@@ -151,7 +158,7 @@ def request(base: str, method: str, path: str, headers: dict[str, str] | None = 
     return {"status": status, "headers": response_headers, "body": raw}
 
 
-def normalized_capture(response: dict) -> dict:
+def normalized_capture(response: dict, *, mask_posted_message: bool = False) -> dict:
     raw_headers = response["headers"]
     headers_lower = {key.lower(): value for key, value in raw_headers}
     selected = {key: headers_lower[key] for key in HEADER_NAMES if key in headers_lower}
@@ -164,7 +171,7 @@ def normalized_capture(response: dict) -> dict:
         "status": response["status"],
         "headers": selected,
         "cookies_set": cookie_shape(raw_headers),
-        "body": normalize_body(response["body"], headers_lower.get("content-type", "")),
+        "body": normalize_body(response["body"], headers_lower.get("content-type", ""), mask_posted_message=mask_posted_message),
     }
 
 
@@ -300,6 +307,19 @@ def main() -> int:
                 captures[name].append(normalized_capture(messages_page))
                 if messages_page["status"] >= 400:
                     raise RuntimeError(f"{name} messages page returned {messages_page['status']}")
+                post_body = urllib.parse.urlencode({
+                    "message[body]": "<div><p>post-parity-marker</p></div>",
+                    "message[client_message_id]": "parity-post-1",
+                }).encode()
+                posted = request(base, "POST", f"/rooms/{room_id}/messages", {
+                    "Cookie": cookie,
+                    "Accept": "text/vnd.turbo-stream.html",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Sec-Fetch-Site": "same-origin",
+                }, post_body)
+                captures[name].append(normalized_capture(posted, mask_posted_message=True))
+                if posted["status"] >= 400:
+                    raise RuntimeError(f"{name} message post returned {posted['status']}")
             baseline = captures["rust"]
             failures = []
             for name in labels_names:
@@ -312,6 +332,7 @@ def main() -> int:
                     (3, f"GET /rooms/{labels['rooms.watercooler']}"),
                     (4, "GET /searches?q=coffee"),
                     (5, f"GET /rooms/{labels['rooms.watercooler']}/messages?before={labels['messages.busy_060']}"),
+                    (6, f"POST /rooms/{labels['rooms.watercooler']}/messages"),
                 ):
                     left, right = baseline[index], captures[name][index]
                     for field in ("status", "headers", "cookies_set", "body"):
@@ -328,7 +349,7 @@ def main() -> int:
                         print(f"  Rust:  {expected!r}\n  {name}: {actual!r}", file=sys.stderr)
                 print(f"Diffs and captures: {args.output}", file=sys.stderr)
                 return 1
-            print(f"PASS: {' vs '.join(name for name in labels_names)} match for sidebar, room, messages, and search pages (seed {args.seed})")
+            print(f"PASS: {' vs '.join(name for name in labels_names)} match for sidebar, room, messages, search, and message post (seed {args.seed})")
             print(f"Captures: {args.output / 'report.json'}")
             print("Masks applied:")
             for mask, reason in MASK_REASONS.items():
