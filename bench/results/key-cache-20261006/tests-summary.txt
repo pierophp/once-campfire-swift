@@ -1,0 +1,5 @@
+Release tests: Swift 6.4 Linux
+CAMPFIRE_SEED_DIR=/seed CAMPFIRE_REQUIRE_SEED=1
+	 Executed 36 tests, with 0 failures (0 unexpected) in 4.685 (4.685) seconds
+Test Suite 'All tests' passed at 2026-10-06 13:07:22.964
+	 Executed 36 tests, with 0 failures (0 unexpected) in 4.685 (4.685) seconds

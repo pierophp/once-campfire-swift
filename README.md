@@ -27,3 +27,11 @@ The image listens on plain HTTP at `HTTP_PORT` (default `80`), opens `/rails/sto
 ## Response compression
 
 The HTTP middleware negotiates `gzip` and `identity` using Rack::Deflater-compatible quality ordering, adds `Vary: Accept-Encoding`, and returns 406 when neither supported encoding is acceptable. It skips bodyless statuses, empty bodies, `Cache-Control: no-transform`, and already encoded responses. Gzip uses the system zlib implementation at level 6. A SHA-256 keyed LRU retains compressed bodies within a 16 MiB byte budget; a single entry larger than 4 MiB is not cached. The `swift-identity` benchmark sends `Accept-Encoding: identity` to exercise the uncompressed response path.
+
+## Performance
+
+Derived Rails keys are shared across short-lived signers in a process-wide cache of at most 128 entries, keyed by secret, salt and key length. PBKDF2 parameters, cookie verification and signature bytes are unchanged. Signatures and ETags use direct UTF-8 hexadecimal encoding instead of formatting a separate string for each byte.
+
+Message fragment keys and HTTP validators reuse timestamp interpretations in a cache of at most 4,096 entries. Its key is the complete timestamp string; the existing parser's normalization and rounding are preserved. Database reads, writes and fragment invalidation still follow the original routes.
+
+The [before/after benchmark](bench/results/key-cache-20261006/report.md) includes raw measurements, image IDs, validation results and a runner adapted from the Rust HTTP harness. It compares the original Swift image, the optimized image and Rust using the same seed and CPU allocation.

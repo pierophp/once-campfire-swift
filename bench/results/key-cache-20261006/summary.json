@@ -1,0 +1,32 @@
+{
+  "room_show": {
+    "swift-before": 111.7,
+    "swift-after": 1465.3,
+    "rust": 14669.2,
+    "gain": 13.118173679498657
+  },
+  "messages_page": {
+    "swift-before": 94.0,
+    "swift-after": 2926.3,
+    "rust": 16758.7,
+    "gain": 31.130851063829788
+  },
+  "sidebar": {
+    "swift-before": 44.7,
+    "swift-after": 3797.6,
+    "rust": 13451.3,
+    "gain": 84.95749440715883
+  },
+  "search": {
+    "swift-before": 323.6,
+    "swift-after": 4356.6,
+    "rust": 13201.0,
+    "gain": 13.46291718170581
+  },
+  "post_message": {
+    "swift-before": 116.6,
+    "swift-after": 288.6,
+    "rust": 3083.9,
+    "gain": 2.475128644939966
+  }
+}

@@ -21,6 +21,25 @@ final class RailsCompatibilityTests: XCTestCase {
         }
     }
 
+    func testDerivedKeysRemainIsolatedAcrossGeneratorInstances() throws {
+        let vectors = try rails
+        let secret = vectors["secret_key_base"] as! String
+        let cases = vectors["key_generator"] as! [[String: Any]]
+        for _ in 0..<2 {
+            for vector in cases.reversed() {
+                let salt = vector["salt"] as! String
+                let length = vector["length"] as! Int
+                let expected = vector["key_hex"] as! String
+                let key = RailsKeyGenerator(secretKeyBase: secret).generate(salt: salt, length: length)
+                XCTAssertEqual(key.map { String(format: "%02x", $0) }.joined(), expected)
+                if length > 0 {
+                    let other = RailsKeyGenerator(secretKeyBase: secret + "-other").generate(salt: salt, length: length)
+                    XCTAssertNotEqual(key, other)
+                }
+            }
+        }
+    }
+
     func testSignedCookieReadsAndWritesRailsEnvelope() throws {
         let vectors = try rails
         let secret = vectors["secret_key_base"] as! String

@@ -1,0 +1,54 @@
+{
+  "server_cpus": "0-3",
+  "loadgen_cpus": "4-7",
+  "http_seconds": 8,
+  "concurrent_clients": 16,
+  "reps": 3,
+  "suites": "http",
+  "workloads": [
+    "room_show",
+    "messages_page",
+    "sidebar",
+    "search",
+    "post_message"
+  ],
+  "baseline_commit": "65a938d",
+  "rust_commit": "ccece30",
+  "changes": [
+    "bounded process-wide PBKDF2 derived-key cache (128 entries)",
+    "direct UTF8 hexadecimal encoding",
+    "bounded immutable timestamp parsing cache (4096 entries)"
+  ],
+  "source_sha256": {
+    "Sources/CampfireCore/RailsCrypto.swift": "ba88bc4766a7989aa27e0658a7fddf1d922f5e0eebd559f5fe02e4bd87bbed78",
+    "Sources/CampfireCore/Rendering.swift": "4cab5011339c60d4d4d1524b93bdeb38673274b3470edac2c181d47d477cec69",
+    "Sources/CampfireCore/RoomRoutes.swift": "656718685a12d4a8440b0978ea806f53b64abb8848807cd15d95cc9411c427c8",
+    "Sources/CampfireCore/HexEncoding.swift": "d11add9b56b76bf9070541bb624bba95d666cc1b87dc13bb3770281c3a74a749",
+    "Sources/CampfireCore/SQLiteTimestampCache.swift": "a2c5e38eadf350373e9da0df189242b47fc265f5b6acb6d7200fc12bb0457554",
+    "Tests/CampfireTests/RailsCompatibilityTests.swift": "c5a97a5569ad7addb77ca9b33e5e54173f9e50d68a7d498b54f91f500056576e",
+    "Tests/CampfireTests/TimestampParsingTests.swift": "c077f40403832ebd3c70a932246258ef3b505d43b9332898caf364b9e1e302ec"
+  },
+  "tests": {
+    "configuration": "release",
+    "swift": "6.4 Linux",
+    "required_seed": true,
+    "executed": 36,
+    "failures": 0
+  },
+  "read_response_parity": true,
+  "images": {
+    "campfire-swift:baseline-65a938d": "sha256:0688660d303b41a662a09be23f28af36eb0a60d11e3e2917eefa8684a50845f2",
+    "campfire-swift:optimized": "sha256:34bf461f0f3d123b8e2c35fb38ca5770245f39fa27bd747963827923a9d41d29",
+    "campfire-rust:app": "sha256:8682df2431bce38498053c41bb20ad56dc4634fe306d092d8b861afa53138ba3"
+  },
+  "build_source_sha256": {
+    "Sources/CampfireCore/RailsCrypto.swift": "ba88bc4766a7989aa27e0658a7fddf1d922f5e0eebd559f5fe02e4bd87bbed78",
+    "Sources/CampfireCore/Rendering.swift": "4cab5011339c60d4d4d1524b93bdeb38673274b3470edac2c181d47d477cec69",
+    "Sources/CampfireCore/RoomRoutes.swift": "656718685a12d4a8440b0978ea806f53b64abb8848807cd15d95cc9411c427c8",
+    "Sources/CampfireCore/HexEncoding.swift": "d11add9b56b76bf9070541bb624bba95d666cc1b87dc13bb3770281c3a74a749",
+    "Sources/CampfireCore/SQLiteTimestampCache.swift": "7e08501f1011105a085290843b6985f007ff05292a70f448058c9e0cebeae214",
+    "Tests/CampfireTests/RailsCompatibilityTests.swift": "c5a97a5569ad7addb77ca9b33e5e54173f9e50d68a7d498b54f91f500056576e",
+    "Tests/CampfireTests/TimestampParsingTests.swift": "c077f40403832ebd3c70a932246258ef3b505d43b9332898caf364b9e1e302ec"
+  },
+  "post_build_edits": "Only a documentation comment in SQLiteTimestampCache.swift changed after the image build; executable source is unchanged."
+}

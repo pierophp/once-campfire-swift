@@ -3,20 +3,15 @@ import Foundation
 
 public final class RailsKeyGenerator: @unchecked Sendable {
     private let secret: Data
-    private let lock = NSLock()
-    private var cache: [CacheKey: Data] = [:]
-    private struct CacheKey: Hashable { let salt: String; let length: Int }
+    private static let cache = DerivedKeyCache()
 
     public init(secretKeyBase: String) { secret = Data(secretKeyBase.utf8) }
 
     public func generate(salt: String, length: Int = 64) -> Data {
         precondition(length >= 0)
-        let cacheKey = CacheKey(salt: salt, length: length)
-        lock.lock(); defer { lock.unlock() }
-        if let key = cache[cacheKey] { return key }
-        let key = Self.pbkdf2(password: secret, salt: Data(salt.utf8), length: length)
-        cache[cacheKey] = key
-        return key
+        return Self.cache.key(secret: secret, salt: salt, length: length) {
+            Self.pbkdf2(password: secret, salt: Data(salt.utf8), length: length)
+        }
     }
 
     private static func pbkdf2(password: Data, salt: Data, length: Int) -> Data {
@@ -40,6 +35,26 @@ public final class RailsKeyGenerator: @unchecked Sendable {
     }
 }
 
+/// Signers are short-lived, but their derived keys are stable for the process's secret.
+/// Bound retention and include every PBKDF2 input so separate secrets cannot share keys.
+private final class DerivedKeyCache: @unchecked Sendable {
+    private struct Key: Hashable { let secret: Data; let salt: String; let length: Int }
+    private let lock = NSLock()
+    private var keys: [Key: Data] = [:]
+    private var order: [Key] = []
+
+    func key(secret: Data, salt: String, length: Int, derive: () -> Data) -> Data {
+        let input = Key(secret: secret, salt: salt, length: length)
+        lock.lock(); defer { lock.unlock() }
+        if let cached = keys[input] { return cached }
+        let result = derive()
+        if order.count == 128 { keys.removeValue(forKey: order.removeFirst()) }
+        keys[input] = result
+        order.append(input)
+        return result
+    }
+}
+
 public enum MessageVerifierDigest { case sha1, sha256 }
 public enum MessageVerifierEncoding { case strict, urlSafe, urlSafePadded }
 
@@ -51,7 +66,7 @@ public struct MessageVerifier {
 
     public func sign(serialized: String) -> String {
         let payload = encoded(Data(serialized.utf8))
-        let signature = mac(Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
+        let signature = hexEncoded(mac(Data(payload.utf8)))
         return "\(payload)--\(signature)"
     }
 
@@ -60,7 +75,7 @@ public struct MessageVerifier {
         let payload = String(token[..<range.lowerBound])
         let signature = String(token[range.upperBound...])
         guard !payload.isEmpty, !signature.isEmpty,
-              constantTimeEqual(Data(signature.utf8), Data(mac(Data(payload.utf8)).map { String(format: "%02x", $0) }.joined().utf8)),
+              constantTimeEqual(Data(signature.utf8), Data(hexEncoded(mac(Data(payload.utf8))).utf8)),
               let data = Data(base64Encoded: payload.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/").paddingBase64()),
               let string = String(data: data, encoding: .utf8) else { return nil }
         return string

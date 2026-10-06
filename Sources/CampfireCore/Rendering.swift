@@ -136,6 +136,6 @@ enum SidebarRenderer {
 }
 
 func etag(for body: String) -> String {
-    let digest = SHA256.hash(data: Data(body.utf8)).map { String(format: "%02x", $0) }.joined()
+    let digest = hexEncoded(SHA256.hash(data: Data(body.utf8)))
     return "W/\"\(digest.prefix(32))\""
 }

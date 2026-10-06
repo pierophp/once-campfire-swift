@@ -424,7 +424,7 @@ func roomAsset(_ logicalName: String) -> String {
     return asset.replacingOccurrences(of: "/assets/", with: "/assets/\(logicalName.dropLast(basename.count))")
 }
 
-private let messageTemplateDigest = SHA256.hash(data: Data("messages/_message|presentation|actions|boosts|action-text-renderer-v1".utf8)).map { String(format: "%02x", $0) }.joined().prefix(32)
+private let messageTemplateDigest = hexEncoded(SHA256.hash(data: Data("messages/_message|presentation|actions|boosts|action-text-renderer-v1".utf8))).prefix(32)
 
 func isoTimestamp(_ value: String) -> String {
     let normalized = value.replacingOccurrences(of: " ", with: "T")
@@ -432,13 +432,7 @@ func isoTimestamp(_ value: String) -> String {
 }
 
 func timestampMicroseconds(_ value: String) -> Int64 {
-    let normalized = value.replacingOccurrences(of: " ", with: "T")
-    let iso = ISO8601DateFormatter()
-    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let date = iso.date(from: normalized.hasSuffix("Z") ? normalized : normalized + "Z") { return Int64((date.timeIntervalSince1970 * 1_000_000).rounded()) }
-    iso.formatOptions = [.withInternetDateTime]
-    if let date = iso.date(from: normalized.hasSuffix("Z") ? normalized : normalized + "Z") { return Int64(date.timeIntervalSince1970 * 1_000_000) }
-    return 0
+    SQLiteTimestampCache.shared.microseconds(value)
 }
 
 func render(message: RoomMessage) -> String {

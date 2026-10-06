@@ -1,0 +1,81 @@
+{
+  "identical_read_responses": true,
+  "snapshots": {
+    "campfire-swift:baseline-65a938d": [
+      {
+        "route": "/rooms/486777696",
+        "status": 200,
+        "sha256": "d923c2d1c4577043238553b16dbd7586310ec1fb681e4e58b6bbdddbab6678b2",
+        "bytes": 371260,
+        "etag": "W/\"d923c2d1c4577043238553b16dbd7586\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      },
+      {
+        "route": "/rooms/486777696/messages?before=933434569",
+        "status": 200,
+        "sha256": "7c337dc4ce3ff0563c6a4ffa77117289eb64812ddede59e7fa4a36f330e4810a",
+        "bytes": 340684,
+        "etag": "W/\"ad9c00c5155debfa2f55b59a549009fe\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      },
+      {
+        "route": "/users/me/sidebar",
+        "status": 200,
+        "sha256": "0a6d2c3ab61deb89dfb21f72c688fe2c3a1a896fbb30cf3450631e4a78956227",
+        "bytes": 29496,
+        "etag": "W/\"0a6d2c3ab61deb89dfb21f72c688fe2c\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      },
+      {
+        "route": "/searches?q=coffee",
+        "status": 200,
+        "sha256": "808d555bb981247855c1afc19612d5706db7e6291e4c28addc8f99c88ff2dcb6",
+        "bytes": 134799,
+        "etag": "W/\"808d555bb981247855c1afc19612d570\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      }
+    ],
+    "campfire-swift:optimized": [
+      {
+        "route": "/rooms/486777696",
+        "status": 200,
+        "sha256": "d923c2d1c4577043238553b16dbd7586310ec1fb681e4e58b6bbdddbab6678b2",
+        "bytes": 371260,
+        "etag": "W/\"d923c2d1c4577043238553b16dbd7586\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      },
+      {
+        "route": "/rooms/486777696/messages?before=933434569",
+        "status": 200,
+        "sha256": "7c337dc4ce3ff0563c6a4ffa77117289eb64812ddede59e7fa4a36f330e4810a",
+        "bytes": 340684,
+        "etag": "W/\"ad9c00c5155debfa2f55b59a549009fe\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      },
+      {
+        "route": "/users/me/sidebar",
+        "status": 200,
+        "sha256": "0a6d2c3ab61deb89dfb21f72c688fe2c3a1a896fbb30cf3450631e4a78956227",
+        "bytes": 29496,
+        "etag": "W/\"0a6d2c3ab61deb89dfb21f72c688fe2c\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      },
+      {
+        "route": "/searches?q=coffee",
+        "status": 200,
+        "sha256": "808d555bb981247855c1afc19612d5706db7e6291e4c28addc8f99c88ff2dcb6",
+        "bytes": 134799,
+        "etag": "W/\"808d555bb981247855c1afc19612d570\"",
+        "content_type": "text/html; charset=utf-8",
+        "cache_control": "max-age=0, private, must-revalidate"
+      }
+    ]
+  }
+}

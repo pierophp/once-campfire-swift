@@ -1,0 +1,31 @@
+{
+  "server_cpus": "0-3",
+  "loadgen_cpus": "4-7",
+  "http_seconds": 8,
+  "concurrent_clients": 16,
+  "reps": 1,
+  "suites": "http",
+  "workloads": [
+    "room_show",
+    "messages_page",
+    "sidebar",
+    "search",
+    "post_message"
+  ],
+  "baseline_commit": "65a938d",
+  "rust_commit": "ccece30",
+  "changes": [
+    "bounded process-wide PBKDF2 derived-key cache",
+    "direct UTF8 hexadecimal encoding"
+  ],
+  "isolated_sidebar_before_rps": 49.6,
+  "isolated_sidebar_key_cache_rps": 2340.3,
+  "tests": {
+    "configuration": "release",
+    "swift": "6.4 Linux",
+    "required_seed": true,
+    "executed": 35,
+    "failures": 0
+  },
+  "note": "Intermediate crypto-only experiment stopped after the first complete repetition; interrupted samples excluded."
+}

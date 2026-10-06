@@ -1,0 +1,2 @@
+docker build -t campfire-swift:optimized .
+SERVER_CPUS=0-3 LOADGEN_CPUS=4-7 HTTP_SECS=8 HTTP_CONCS='16' SUITES=http LOAD_MAX=10 LOAD_WAIT_SECS=30 PORT=4490 bench/results/key-cache-20261006/run-http --apps swift-before,swift-after,rust --reps 3 --out bench/results/key-cache-20261006
