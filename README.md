@@ -32,13 +32,13 @@ The HTTP middleware negotiates `gzip` and `identity` using Rack::Deflater-compat
 
 Swift now outperforms the Rust port in throughput on every benchmarked endpoint: medians from three runs, 16 clients, four server CPUs, gzip ([raw results](bench/results/wal-pages-20261006)):
 
-| Endpoint | Swift | Rust `ccece30` |
-|---|---:|---:|
-| Room page | 16,720 | 14,575 |
-| Messages page | 19,259 | 16,718 |
-| Sidebar | 15,532 | 13,367 |
-| Search | 15,781 | 13,613 |
-| Post message | 3,197 | 3,050 |
+| Endpoint | Swift | Rust `ccece30` | Swift vs Rust |
+|---|---:|---:|---:|
+| Room page | 16,720 | 14,575 | +15% (1.15×) |
+| Messages page | 19,259 | 16,718 | +15% (1.15×) |
+| Sidebar | 15,532 | 13,366 | +16% (1.16×) |
+| Search | 15,781 | 13,613 | +16% (1.16×) |
+| Post message | 3,197 | 3,050 | +5% (1.05×) |
 
 Swift has the lower median latency everywhere but a higher p99 (2.4–3.2 ms against 1.6–2.2 ms on reads; 29.5 ms against 10.9 ms on posts, from WAL checkpoints on disk), and peaks at ~175 MiB against Rust's ~145 MiB. Read responses, including ETags, are byte-identical to the previous revision.
 
