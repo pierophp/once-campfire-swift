@@ -1,0 +1,12 @@
+11:51:37 rust rep 1 start:  11:51:37 up  3:26,  5 users,  load average: 3.45, 2.77, 2.29
+11:52:38 rust rep 1 end:    11:52:38 up  3:27,  5 users,  load average: 3.81, 2.99, 2.39
+11:52:38 swift-after rep 1 start:  11:52:38 up  3:27,  5 users,  load average: 3.81, 2.99, 2.39
+11:53:40 swift-after rep 1 end:    11:53:40 up  3:28,  5 users,  load average: 5.01, 3.44, 2.58
+11:53:40 swift-after rep 2 start:  11:53:40 up  3:28,  5 users,  load average: 5.01, 3.44, 2.58
+11:54:41 swift-after rep 2 end:    11:54:41 up  3:29,  5 users,  load average: 6.60, 4.13, 2.87
+11:54:41 rust rep 2 start:  11:54:41 up  3:29,  5 users,  load average: 6.60, 4.13, 2.87
+11:55:43 rust rep 2 end:    11:55:43 up  3:30,  5 users,  load average: 5.06, 4.13, 2.95
+11:55:43 rust rep 3 start:  11:55:43 up  3:30,  5 users,  load average: 5.06, 4.13, 2.95
+11:56:44 rust rep 3 end:    11:56:44 up  3:31,  5 users,  load average: 5.10, 4.27, 3.08
+11:56:44 swift-after rep 3 start:  11:56:44 up  3:31,  5 users,  load average: 5.10, 4.27, 3.08
+11:57:45 swift-after rep 3 end:    11:57:45 up  3:32,  5 users,  load average: 6.30, 4.70, 3.29

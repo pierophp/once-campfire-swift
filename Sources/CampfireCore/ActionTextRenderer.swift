@@ -25,7 +25,7 @@ public protocol ActionTextUserResolving: Sendable {
 
 /// Renders stored Action Text bodies for message HTML and plain-text consumers.
 /// Parsing failures and unsupported nesting use the message partial's unrenderable fallback: empty output.
-public struct ActionTextRenderer {
+public struct ActionTextRenderer: Sendable {
     private let verifier: RailsSignedGlobalID?
     private let userResolver: (any ActionTextUserResolving)?
     private let now: @Sendable () -> String
@@ -122,7 +122,7 @@ public struct ActionTextRenderer {
         let signedURI = verifier?.locate(sgid, purpose: "attachable", now: now())
         let uri = signedURI ?? unverifiedGlobalID(from: sgid)
         guard let uri,
-              let match = try? NSRegularExpression(pattern: #"^gid://[^/]+/User/(\d+)"#).firstMatch(in: uri, range: NSRange(uri.startIndex..., in: uri)),
+              let match = mentionGlobalIDPattern?.firstMatch(in: uri, range: NSRange(uri.startIndex..., in: uri)),
               let range = Range(match.range(at: 1), in: uri), let id = Int(uri[range]) else { return nil }
         return userResolver.user(id: id)
     }
@@ -139,8 +139,7 @@ public struct ActionTextRenderer {
     }
 
     private func autolink(_ root: Element) throws {
-        let pattern = #"(?i)(https?://|www\.)[^\s<>"\x{A0}]+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
+        guard let regex = autolinkPattern else { return }
         var textNodes: [TextNode] = []
         func collect(_ node: Node) {
             if let text = node as? TextNode { textNodes.append(text); return }
@@ -283,13 +282,17 @@ private func escapeHTMLAttribute(_ value: String) -> String {
     escapeHTMLText(value).replacingOccurrences(of: "\"", with: "&quot;").replacingOccurrences(of: "'", with: "&#39;")
 }
 
+// Compiled once; NSRegularExpression matching is thread-safe.
+nonisolated(unsafe) private let mentionGlobalIDPattern = try? NSRegularExpression(pattern: #"^gid://[^/]+/User/(\d+)"#)
+nonisolated(unsafe) private let autolinkPattern = try? NSRegularExpression(pattern: #"(?i)(https?://|www\.)[^\s<>"\x{A0}]+"#)
+nonisolated(unsafe) private let tagPattern = try? NSRegularExpression(pattern: #"</?([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>"#)
+private let voidTags: Set<String> = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]
+
 private func nestingDepth(_ html: String) -> Int {
-    let pattern = #"</?([A-Za-z][A-Za-z0-9:-]*)\b[^>]*>"#
-    guard let regex = try? NSRegularExpression(pattern: pattern) else { return 0 }
+    guard let regex = tagPattern else { return 0 }
     let ns = html as NSString
     var depth = 0
     var maximum = 0
-    let voidTags: Set<String> = ["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]
     for match in regex.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
         guard match.numberOfRanges > 1 else { continue }
         let token = ns.substring(with: match.range)

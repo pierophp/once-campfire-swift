@@ -75,11 +75,7 @@ func installAvatarRoutes(on router: Router<BasicRequestContext>, database: SQLit
 }
 
 func httpDate(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
-    return formatter.string(from: date)
+    UTCTime.httpDate(Int64(date.timeIntervalSince1970.rounded(.down)))
 }
 
 private func inlineDisposition(_ filename: String) -> String {

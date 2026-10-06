@@ -1,4 +1,3 @@
-import Crypto
 import CZlib
 import HTTPTypes
 import Hummingbird
@@ -11,12 +10,12 @@ struct GzipMiddleware: RouterMiddleware {
 
     func handle(_ request: Request, context: BasicRequestContext,
                 next: (Request, BasicRequestContext) async throws -> Response) async throws -> Response {
-        var response = try await next(request, context)
+        let declared = ResponseBodyIdentity()
+        var response = try await ResponseBodyIdentity.$current.withValue(declared) { try await next(request, context) }
         guard shouldCompress(response) else { return response }
 
         addVaryAcceptEncoding(to: &response.headers)
-        let accepted = parseAcceptEncoding(request.headers[.acceptEncoding] ?? "")
-        guard let encoding = bestEncoding(accepted) else {
+        guard let encoding = negotiatedEncoding(request.headers[.acceptEncoding] ?? "") else {
             let path = request.uri.path
             let message = "An acceptable encoding for the requested resource \(path) could not be found."
             var failure = Response(status: .notAcceptable, body: .init(byteBuffer: ByteBuffer(string: message)))
@@ -25,22 +24,28 @@ struct GzipMiddleware: RouterMiddleware {
         }
         guard encoding == "gzip" else { return response }
 
+        // A page that declared its identity is found without reading its body.
+        if let identity = declared.identity, let cached = cache.value(for: identity) {
+            response.headers[.contentEncoding] = "gzip"
+            response.body = .init(byteBuffer: cached)
+            response.headers[.contentLength] = nil
+            return response
+        }
+
         let collector = BodyCollector()
         try await response.body.write(collector)
-        let originalBytes = collector.buffer.readableBytesView
-        let identityBody = Array(originalBytes)
-        guard !identityBody.isEmpty else { return response }
-        let digest = Data(SHA256.hash(data: Data(identityBody)))
-        let compressed: [UInt8]
-        if let cached = cache.value(for: digest) {
+        let identityBody = collector.buffer
+        guard identityBody.readableBytes > 0 else { return response }
+        let compressed: ByteBuffer
+        if declared.identity == nil, let cached = cache.value(for: identityBody) {
             compressed = cached
         } else {
-            guard let generated = try? gzip(identityBody) else { return response }
-            compressed = generated
-            cache.insert(compressed, for: digest)
+            guard let generated = try? identityBody.withUnsafeReadableBytes({ try gzip($0) }) else { return response }
+            compressed = ByteBuffer(bytes: generated)
+            if let identity = declared.identity { cache.insert(compressed, for: identity) } else { cache.insert(compressed, for: identityBody) }
         }
         response.headers[.contentEncoding] = "gzip"
-        response.body = .init(byteBuffer: ByteBuffer(bytes: compressed))
+        response.body = .init(byteBuffer: compressed)
         response.headers[.contentLength] = nil
         return response
     }
@@ -55,7 +60,14 @@ private func shouldCompress(_ response: Response) -> Bool {
     return true
 }
 
+private struct WordLookup: Hashable { let value: String; let word: String }
+private let headerWords = BoundedCache<WordLookup, Bool>(limit: 1_024)
+
 private func hasWord(_ value: String, _ word: String) -> Bool {
+    headerWords.value(for: WordLookup(value: value, word: word)) { findWord(value, word) }
+}
+
+private func findWord(_ value: String, _ word: String) -> Bool {
     value.split { !$0.isASCII || !( $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") }
         .contains { $0.caseInsensitiveCompare(word) == .orderedSame }
 }
@@ -64,6 +76,13 @@ private func addVaryAcceptEncoding(to headers: inout HTTPFields) {
     let values = headers[.vary]?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? []
     guard !values.contains(where: { $0 == "*" || $0.caseInsensitiveCompare("Accept-Encoding") == .orderedSame }) else { return }
     headers[.vary] = (values + ["Accept-Encoding"]).joined(separator: ",")
+}
+
+private let negotiatedEncodings = BoundedCache<String, String?>(limit: 1_024)
+
+/// Negotiation is a pure function of the Accept-Encoding header, which clients repeat verbatim.
+private func negotiatedEncoding(_ header: String) -> String? {
+    negotiatedEncodings.value(for: header) { bestEncoding(parseAcceptEncoding(header)) }
 }
 
 private func parseAcceptEncoding(_ header: String) -> [(String, Double)] {
@@ -124,7 +143,7 @@ private func bestEncoding(_ accepted: [(String, Double)]) -> String? {
     return candidates.first(where: { supported.contains($0) })
 }
 
-private func gzip(_ bytes: [UInt8]) throws -> [UInt8] {
+private func gzip(_ bytes: UnsafeRawBufferPointer) throws -> [UInt8] {
     var stream = z_stream()
     let initialized = deflateInit2_(&stream, 6, Z_DEFLATED, MAX_WBITS + 16, MAX_MEM_LEVEL, Z_DEFAULT_STRATEGY,
                                     ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
@@ -133,7 +152,7 @@ private func gzip(_ bytes: [UInt8]) throws -> [UInt8] {
 
     var output = [UInt8](repeating: 0, count: max(256, bytes.count + bytes.count / 8 + 128))
     var outputCount = 0
-    let result = bytes.withUnsafeBytes { inputBytes in
+    let result = { (inputBytes: UnsafeRawBufferPointer) in
         output.withUnsafeMutableBytes { outputBytes in
             if let baseAddress = inputBytes.baseAddress {
                 stream.next_in = UnsafeMutablePointer(mutating: baseAddress.assumingMemoryBound(to: Bytef.self))
@@ -150,7 +169,7 @@ private func gzip(_ bytes: [UInt8]) throws -> [UInt8] {
                 if status != Z_OK { return status }
             } while true
         }
-    }
+    }(bytes)
     guard result == Z_STREAM_END else { throw GzipError.compressionFailed(result) }
     output.removeSubrange(outputCount..<output.count)
     return output
@@ -163,40 +182,83 @@ private enum GzipError: Error {
 
 private final class BodyCollector: ResponseBodyWriter, @unchecked Sendable {
     var buffer = ByteBuffer()
-    func write(_ buffer: ByteBuffer) async throws { self.buffer.writeImmutableBuffer(buffer) }
+    private var written = false
+    func write(_ buffer: ByteBuffer) async throws {
+        // A buffered body arrives as one buffer; keep it rather than copying it.
+        if written { self.buffer.writeImmutableBuffer(buffer) } else { self.buffer = buffer; written = true }
+    }
     func finish(_ trailingHeaders: HTTPFields?) async throws {}
 }
 
+/// Compressed bodies. A body is found by the identity its page declared (see `RenderedPage`),
+/// or else by CRC-32 and length confirmed by comparing the stored plain bytes, so a hit always
+/// returns the gzip of exactly this body. Eviction is CLOCK (second chance), O(1) amortized.
 private final class GzipCache: @unchecked Sendable {
-    private struct Entry { var bytes: [UInt8]; var lastAccess: UInt64 }
+    private enum Key: Hashable {
+        case declared(BodyIdentity)
+        case content(length: Int, crc: UInt)
+    }
+    private struct Entry { let plain: ByteBuffer?; let compressed: ByteBuffer; var referenced: Bool }
     private let lock = NSLock()
-    private let byteBudget = 16 * 1024 * 1024
+    private let byteBudget = 32 * 1024 * 1024
     private var bytesInCache = 0
-    private var clock: UInt64 = 0
-    private var entries: [Data: Entry] = [:]
+    private var entries: [Key: Entry] = [:]
+    private var queue: [Key] = []
+    private var head = 0
 
-    func value(for key: Data) -> [UInt8]? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard var entry = entries[key] else { return nil }
-        clock &+= 1
-        entry.lastAccess = clock
-        entries[key] = entry
-        return entry.bytes
+    private static func key(_ body: ByteBuffer) -> Key {
+        body.withUnsafeReadableBytes { bytes in
+            .content(length: bytes.count, crc: UInt(crc32(0, bytes.bindMemory(to: Bytef.self).baseAddress, uInt(bytes.count))))
+        }
     }
 
-    func insert(_ compressed: [UInt8], for key: Data) {
-        let cost = compressed.count + 64
+    private static func cost(_ entry: Entry) -> Int { (entry.plain?.readableBytes ?? 0) + entry.compressed.readableBytes + 128 }
+
+    func value(for identity: BodyIdentity) -> ByteBuffer? { lookup(.declared(identity))?.compressed }
+
+    func value(for plain: ByteBuffer) -> ByteBuffer? {
+        guard let entry = lookup(Self.key(plain)), entry.plain == plain else { return nil }
+        return entry.compressed
+    }
+
+    func insert(_ compressed: ByteBuffer, for identity: BodyIdentity) {
+        store(Entry(plain: nil, compressed: compressed, referenced: false), for: .declared(identity))
+    }
+
+    func insert(_ compressed: ByteBuffer, for plain: ByteBuffer) {
+        store(Entry(plain: plain, compressed: compressed, referenced: false), for: Self.key(plain))
+    }
+
+    private func lookup(_ key: Key) -> Entry? {
+        lock.lock(); defer { lock.unlock() }
+        guard var entry = entries[key] else { return nil }
+        if !entry.referenced { entry.referenced = true; entries[key] = entry }
+        return entry
+    }
+
+    private func store(_ entry: Entry, for key: Key) {
+        let cost = Self.cost(entry)
         guard cost <= byteBudget / 4 else { return }
         lock.lock()
         defer { lock.unlock() }
-        if let prior = entries.removeValue(forKey: key) { bytesInCache -= prior.bytes.count + 64 }
-        clock &+= 1
-        entries[key] = Entry(bytes: compressed, lastAccess: clock)
-        bytesInCache += cost
-        while bytesInCache > byteBudget, let oldest = entries.min(by: { $0.value.lastAccess < $1.value.lastAccess }) {
-            bytesInCache -= oldest.value.bytes.count + 64
-            entries.removeValue(forKey: oldest.key)
+        if let prior = entries.updateValue(entry, forKey: key) {
+            bytesInCache -= Self.cost(prior)
+        } else {
+            queue.append(key)
         }
+        bytesInCache += cost
+        while bytesInCache > byteBudget && head < queue.count {
+            let candidate = queue[head]; head += 1
+            guard var victim = entries[candidate] else { continue }
+            if victim.referenced {
+                victim.referenced = false
+                entries[candidate] = victim
+                queue.append(candidate)
+            } else {
+                bytesInCache -= Self.cost(victim)
+                entries.removeValue(forKey: candidate)
+            }
+        }
+        if head > 1_024 && head * 2 > queue.count { queue.removeFirst(head); head = 0 }
     }
 }

@@ -79,14 +79,14 @@ func allowsSameOrigin(_ request: Request) -> Bool {
     let origin = request.headers[.origin]
     if let origin {
         if origin == "null" { return false }
-        let secure = ProcessInfo.processInfo.environment["DISABLE_SSL"] != "1"
+        let secure = !AppSecrets.sslDisabled
         let expected = "\(secure ? "https" : "http")://\(request.head.authority ?? "localhost")"
         guard origin == expected else { return false }
     }
     switch request.headers[HTTPField.Name("sec-fetch-site")!] {
     case "same-origin", "same-site": return true
     case "cross-site": return false
-    case nil: return ProcessInfo.processInfo.environment["DISABLE_SSL"] == "1"
+    case nil: return AppSecrets.sslDisabled
     default: return false
     }
 }

@@ -55,10 +55,11 @@ private final class DerivedKeyCache: @unchecked Sendable {
     }
 }
 
-public enum MessageVerifierDigest { case sha1, sha256 }
-public enum MessageVerifierEncoding { case strict, urlSafe, urlSafePadded }
+public enum MessageVerifierDigest: Sendable { case sha1, sha256 }
+public enum MessageVerifierEncoding: Sendable { case strict, urlSafe, urlSafePadded }
 
-public struct MessageVerifier {
+// SymmetricKey is immutable after initialization.
+public struct MessageVerifier: @unchecked Sendable {
     private let secret: SymmetricKey
     private let digest: MessageVerifierDigest
     private let encoding: MessageVerifierEncoding
@@ -90,16 +91,24 @@ public struct MessageVerifier {
     }
 
     public func verifyCookie(_ token: String, name: String, now: String) -> String? {
+        guard let cookie = verifiedCookie(token, name: name) else { return nil }
+        if let expiry = cookie.expiresAt, now >= expiry { return nil }
+        return cookie.value
+    }
+
+    /// The time-independent part of `verifyCookie`: signature, purpose and payload. The caller
+    /// applies the expiry, so a verified envelope can be reused across requests.
+    public func verifiedCookie(_ token: String, name: String) -> (value: String, expiresAt: String?)? {
         guard let serialized = verify(token), let data = serialized.data(using: .utf8) else { return nil }
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rails = root["_rails"] as? [String: Any] else {
-            return (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) as? String
+            return ((try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) as? String).map { ($0, nil) }
         }
-        if let expiry = rails["exp"] as? String, now >= expiry { return nil }
+        let expiry = rails["exp"] as? String
         if let purpose = rails["pur"] as? String, !purpose.isEmpty, purpose != "cookie.\(name)" { return nil }
         if let message = rails["message"] as? String,
            let bytes = Data(base64Encoded: message),
-           let value = try? JSONSerialization.jsonObject(with: bytes, options: [.fragmentsAllowed]) as? String { return value }
+           let value = try? JSONSerialization.jsonObject(with: bytes, options: [.fragmentsAllowed]) as? String { return (value, expiry) }
         return nil
     }
 
@@ -118,8 +127,8 @@ public struct MessageVerifier {
         let strict = data.base64EncodedString()
         switch encoding {
         case .strict: return strict
-        case .urlSafe: return strict.replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-        case .urlSafePadded: return strict.replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        case .urlSafe: return base64URL(strict, padded: false)
+        case .urlSafePadded: return base64URL(strict, padded: true)
         }
     }
 
@@ -133,7 +142,7 @@ public struct MessageVerifier {
 
 public enum MessageEncryptorError: Error { case invalidNonce }
 
-public struct MessageEncryptor {
+public struct MessageEncryptor: @unchecked Sendable {
     private let key: SymmetricKey
     public init(key: Data) { precondition(key.count == 32, "AES-256-GCM requires a 32-byte key"); self.key = SymmetricKey(data: key) }
 
@@ -169,7 +178,7 @@ public struct MessageEncryptor {
     }
 }
 
-public struct RailsSignedID {
+public struct RailsSignedID: Sendable {
     private let verifier: MessageVerifier
     public init(secretKeyBase: String) {
         let key = RailsKeyGenerator(secretKeyBase: secretKeyBase).generate(salt: "active_record/signed_id", length: 64)
@@ -190,7 +199,7 @@ public struct RailsSignedID {
     }
 }
 
-public struct RailsSignedGlobalID {
+public struct RailsSignedGlobalID: Sendable {
     private let verifier: MessageVerifier
     public init(secretKeyBase: String) {
         let key = RailsKeyGenerator(secretKeyBase: secretKeyBase).generate(salt: "signed_global_ids", length: 64)
@@ -213,7 +222,7 @@ public struct RailsSignedGlobalID {
     }
 }
 
-public struct RailsTurboStreamSigner {
+public struct RailsTurboStreamSigner: Sendable {
     private let verifier: MessageVerifier
     public init(secretKeyBase: String) {
         let key = RailsKeyGenerator(secretKeyBase: secretKeyBase).generate(salt: "turbo/signed_stream_verifier_key", length: 64)
@@ -235,7 +244,24 @@ private func constantTimeEqual(_ lhs: Data, _ rhs: Data) -> Bool {
     return zip(lhs, rhs).reduce(UInt8(0)) { $0 | ($1.0 ^ $1.1) } == 0
 }
 
+/// Converts strict Base64 text to the URL-safe alphabet, optionally keeping `=` padding.
+func base64URL(_ strict: String, padded: Bool) -> String {
+    var output: [UInt8] = []
+    output.reserveCapacity(strict.utf8.count)
+    for byte in strict.utf8 {
+        switch byte {
+        case UInt8(ascii: "+"): output.append(UInt8(ascii: "-"))
+        case UInt8(ascii: "/"): output.append(UInt8(ascii: "_"))
+        case UInt8(ascii: "="): if padded { output.append(byte) }
+        default: output.append(byte)
+        }
+    }
+    return String(decoding: output, as: UTF8.self)
+}
+
 private func jsonEscape(_ value: String) -> String {
+    // Printable ASCII other than quote and backslash serializes unchanged (`\/` is undone below).
+    if value.utf8.allSatisfy({ $0 >= 0x20 && $0 < 0x7F && $0 != UInt8(ascii: "\"") && $0 != UInt8(ascii: "\\") }) { return value }
     let data = (try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])) ?? Data("\"\"".utf8)
     return String(decoding: data.dropFirst().dropLast(), as: UTF8.self).replacingOccurrences(of: "\\/", with: "/")
 }

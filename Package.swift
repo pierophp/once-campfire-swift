@@ -19,7 +19,13 @@ let package = Package(
             name: "CSQLite",
             path: "Vendor/SQLite",
             publicHeadersPath: ".",
-            cSettings: [.define("SQLITE_ENABLE_FTS5"), .define("SQLITE_THREADSAFE", to: "2")]
+            cSettings: [
+                .define("SQLITE_ENABLE_FTS5"), .define("SQLITE_THREADSAFE", to: "2"),
+                // Memory statistics take a global mutex on every allocation; nothing reads them.
+                .define("SQLITE_DEFAULT_MEMSTATUS", to: "0"),
+                // Release C targets otherwise build with -Os; SQLite is on every request's path.
+                .unsafeFlags(["-O3"], .when(configuration: .release)),
+            ]
         ),
         .systemLibrary(name: "CZlib", pkgConfig: "zlib"),
         .target(

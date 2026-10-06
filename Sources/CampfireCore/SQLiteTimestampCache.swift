@@ -1,7 +1,7 @@
 import Foundation
 
-/// Timestamp strings are immutable version identifiers. Cache their interpretation, not
-/// database rows or responses; changed strings retain the existing validator semantics.
+/// Timestamp strings are immutable version identifiers. SQLite's canonical shapes are parsed
+/// arithmetically; anything else keeps the ISO8601DateFormatter interpretation, memoized.
 final class SQLiteTimestampCache: @unchecked Sendable {
     static let shared = SQLiteTimestampCache()
     private let lock = NSLock()
@@ -17,6 +17,11 @@ final class SQLiteTimestampCache: @unchecked Sendable {
     }
 
     func microseconds(_ value: String) -> Int64 {
+        if let parsed = UTCTime.parseMicroseconds(value) { return parsed }
+        return formatterMicroseconds(value)
+    }
+
+    private func formatterMicroseconds(_ value: String) -> Int64 {
         lock.lock(); defer { lock.unlock() }
         if let cached = values[value] { return cached }
         let normalized = value.replacingOccurrences(of: " ", with: "T")

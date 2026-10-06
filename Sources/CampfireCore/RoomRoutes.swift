@@ -37,49 +37,64 @@ struct MessageVersion: Sendable {
     let createdAtMilliseconds: Int64
 }
 
-/// Byte-bounded LRU for Rails-style message partials. The lookup happens before loading a
+/// Byte-bounded cache for Rails-style message partials. The lookup happens before loading a
 /// message's creator, rich text, boosts, or building the per-message presentation value.
+/// Eviction is CLOCK (second chance): recently read entries survive one pass of the hand.
 final class MessageFragmentCache: @unchecked Sendable {
-    private struct Entry { let html: String; let bytes: Int; var used: UInt64 }
+    private struct Entry { let fragment: MessageFragment; let bytes: Int; var referenced: Bool }
     private let maxBytes: Int
     private let lock = NSLock()
-    private var entries: [String: Entry] = [:]
+    private var entries: [MessageFragmentKey: Entry] = [:]
+    private var queue: [MessageFragmentKey] = []
+    private var head = 0
     private var bytes = 0
-    private var clock: UInt64 = 0
 
     init(maxBytes: Int) { self.maxBytes = max(0, maxBytes) }
 
-    func value(for key: String) -> String? {
+    /// One lock acquisition for a page of keys; misses are nil.
+    func values(for keys: [MessageFragmentKey]) -> [MessageFragment?] {
         lock.lock(); defer { lock.unlock() }
-        guard var entry = entries[key] else { return nil }
-        clock &+= 1; entry.used = clock; entries[key] = entry
-        return entry.html
+        return keys.map(touch)
     }
 
-    func insert(_ html: String, for key: String) -> String {
-        let cost = key.utf8.count + html.utf8.count + 240
-        guard cost <= maxBytes / 4 else { return html }
+    private func touch(_ key: MessageFragmentKey) -> MessageFragment? {
+        guard var entry = entries[key] else { return nil }
+        if !entry.referenced { entry.referenced = true; entries[key] = entry }
+        return entry.fragment
+    }
+
+    func insert(_ html: String, for key: MessageFragmentKey) -> MessageFragment {
+        let fragment = MessageFragment(html: html)
+        let cost = key.byteCount + fragment.byteCount + 240
+        guard cost <= maxBytes / 4 else { return fragment }
         lock.lock(); defer { lock.unlock() }
-        if let existing = entries[key] { return existing.html }
-        while bytes + cost > maxBytes, let oldest = entries.min(by: { $0.value.used < $1.value.used }) {
-            bytes -= oldest.value.bytes
-            entries.removeValue(forKey: oldest.key)
+        if let existing = entries[key] { return existing.fragment }
+        while bytes + cost > maxBytes && head < queue.count {
+            let candidate = queue[head]; head += 1
+            guard var victim = entries[candidate] else { continue }
+            if victim.referenced {
+                victim.referenced = false
+                entries[candidate] = victim
+                queue.append(candidate)
+            } else {
+                bytes -= victim.bytes
+                entries.removeValue(forKey: candidate)
+            }
         }
-        clock &+= 1
-        entries[key] = Entry(html: html, bytes: cost, used: clock)
+        if head > 1_024 && head * 2 > queue.count { queue.removeFirst(head); head = 0 }
+        entries[key] = Entry(fragment: fragment, bytes: cost, referenced: false)
+        queue.append(key)
         bytes += cost
-        return html
+        return fragment
     }
 }
 
 func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, fragmentCache: MessageFragmentCache) {
     router.post("/rooms/:id/messages") { request, context async throws -> Response in
         let remoteAddress = request.headers[HTTPField.Name("x-forwarded-for")!]?.split(separator: ",").first.map(String.init) ?? "127.0.0.1"
-        let banned = try await Task.detached {
-            try database.read { connection in
-                try connection.firstRow("SELECT 1 FROM bans WHERE ip_address=? LIMIT 1", bindings: [.text(remoteAddress)]) != nil
-            }
-        }.value
+        let banned = try await database.readAsync { connection in
+            try connection.firstRow("SELECT 1 FROM bans WHERE ip_address=? LIMIT 1", bindings: [.text(remoteAddress)]) != nil
+        }
         if banned { return Response(status: .tooManyRequests) }
 
         guard let session = try await SessionPipeline.load(request, database: database) else {
@@ -93,11 +108,9 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         }
 
         let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
-        let room = try await Task.detached {
-            try database.read { connection in
-                try connection.firstRow("SELECT r.id, r.name, r.type FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
-            }
-        }.value
+        let room = try await database.readAsync { connection in
+            try connection.firstRow("SELECT r.id, r.name, r.type FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
+        }
         guard let room, let storedRoomID = room.integer(0), let roomType = room.string(2) else {
             var response = Response(status: .found)
             response.headers[.location] = "/"
@@ -112,66 +125,54 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         let body = form["message[body]"]
         let clientMessageID = form["message[client_message_id]"]?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? UUID().uuidString.lowercased()
         let createdAt = sqliteTimestamp()
-        let renderer = ActionTextRenderer(secretKeyBase: ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base")
-        let plainText = body.map(renderer.plainText) ?? ""
-        let messageID = try await Task.detached {
-            try database.write { connection, hooks in
-                let inserted = try connection.firstRow("INSERT INTO messages (client_message_id, created_at, creator_id, room_id, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id", bindings: [.text(clientMessageID), .text(createdAt), .integer(session.user.id), .integer(storedRoomID), .text(createdAt)])
-                guard let id = inserted?.integer(0) else { throw SQLiteError.query("Message insert did not return its id") }
-                if let body {
-                    let bodyAt = sqliteTimestamp()
-                    try connection.execute("INSERT INTO action_text_rich_texts (body, created_at, name, record_id, record_type, updated_at) VALUES (?, ?, 'body', ?, 'Message', ?)", bindings: [.text(body), .text(bodyAt), .integer(id), .text(bodyAt)])
-                    try connection.execute("UPDATE messages SET updated_at=? WHERE id=?", bindings: [.text(sqliteTimestamp()), .integer(id)])
-                }
-                try connection.execute("UPDATE rooms SET updated_at=? WHERE id=?", bindings: [.text(sqliteTimestamp()), .integer(storedRoomID)])
-
-                hooks.append { writer in
-                    try writer.execute("INSERT INTO message_search_index(rowid, body) VALUES (?, ?)", bindings: [.integer(id), .text(plainText)])
-                    try writer.execute("UPDATE memberships SET unread_at=?, updated_at=? WHERE room_id=? AND involvement!='invisible' AND (connected_at IS NULL OR connected_at < datetime('now', '-1 minute')) AND user_id!=?", bindings: [.text(createdAt), .text(sqliteTimestamp()), .integer(storedRoomID), .integer(session.user.id)])
-                }
-                return id
+        let plainText = body.map(AppSecrets.actionText.plainText) ?? ""
+        let messageID = try await database.writeAsync { connection, hooks in
+            let inserted = try connection.firstRow("INSERT INTO messages (client_message_id, created_at, creator_id, room_id, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id", bindings: [.text(clientMessageID), .text(createdAt), .integer(session.user.id), .integer(storedRoomID), .text(createdAt)])
+            guard let id = inserted?.integer(0) else { throw SQLiteError.query("Message insert did not return its id") }
+            if let body {
+                let bodyAt = sqliteTimestamp()
+                try connection.execute("INSERT INTO action_text_rich_texts (body, created_at, name, record_id, record_type, updated_at) VALUES (?, ?, 'body', ?, 'Message', ?)", bindings: [.text(body), .text(bodyAt), .integer(id), .text(bodyAt)])
+                try connection.execute("UPDATE messages SET updated_at=? WHERE id=?", bindings: [.text(sqliteTimestamp()), .integer(id)])
             }
-        }.value
+            try connection.execute("UPDATE rooms SET updated_at=? WHERE id=?", bindings: [.text(sqliteTimestamp()), .integer(storedRoomID)])
+
+            hooks.append { writer in
+                try writer.execute("INSERT INTO message_search_index(rowid, body) VALUES (?, ?)", bindings: [.integer(id), .text(plainText)])
+                try writer.execute("UPDATE memberships SET unread_at=?, updated_at=? WHERE room_id=? AND involvement!='invisible' AND (connected_at IS NULL OR connected_at < datetime('now', '-1 minute')) AND user_id!=?", bindings: [.text(createdAt), .text(sqliteTimestamp()), .integer(storedRoomID), .integer(session.user.id)])
+            }
+            return id
+        }
 
         // Rails enqueues this after the post-commit unread updates. Delivery is intentionally a
         // no-op because the parity seed has no live push endpoints.
         MessagePushJobQueue.enqueue(roomID: storedRoomID, messageID: messageID)
 
-        let version = try await Task.detached {
-            try database.read { connection -> MessageVersion in
-                guard let row = try connection.firstRow("SELECT created_at, updated_at FROM messages WHERE id=?", bindings: [.integer(messageID)]),
-                      let created = row.string(0), let updated = row.string(1) else {
-                    throw SQLiteError.query("Inserted message was not found after commit")
-                }
-                return MessageVersion(id: messageID, createdAt: created, updatedAt: updated, createdAtMilliseconds: timestampMicroseconds(created) / 1000)
+        let rendered = try await database.readAsync { connection -> MessageFragment in
+            guard let row = try connection.firstRow("SELECT created_at, updated_at FROM messages WHERE id=?", bindings: [.integer(messageID)]),
+                  let created = row.string(0), let updated = row.string(1) else {
+                throw SQLiteError.query("Inserted message was not found after commit")
             }
-        }.value
-        let rendered = try await Task.detached {
-            try database.read { connection -> String in
-                let message = try loadMessage(connection, version: version, roomName: room.string(1) ?? "", roomID: storedRoomID)
-                return fragmentCache.insert(render(message: message), for: messageFragmentKey(version))
-            }
-        }.value
+            let version = MessageVersion(id: messageID, createdAt: created, updatedAt: updated, createdAtMilliseconds: timestampMicroseconds(created) / 1000)
+            let message = try loadMessage(connection, version: version, roomName: room.string(1) ?? "", roomID: storedRoomID)
+            let rendered = fragmentCache.insert(render(message: message), for: messageFragmentKey(version))
 
-        // The room's message callback reads the memberships used for broadcasts and finds any
-        // bot webhook recipients after the fragment has been rendered into cache.
-        _ = try await Task.detached {
-            try database.read { connection in
-                try connection.rows("SELECT id, user_id, unread_at FROM memberships WHERE room_id=? AND involvement!='invisible' AND unread_at IS NOT NULL", bindings: [.integer(storedRoomID)])
-            }
-        }.value
-        _ = try await Task.detached {
-            try database.read { connection in
-                try connection.rows("SELECT DISTINCT u.id FROM users u INNER JOIN memberships m ON m.user_id=u.id WHERE m.room_id=? AND u.status=0 AND u.role=2", bindings: [.integer(storedRoomID)]).compactMap { $0.integer(0) }
-            }
-        }.value
+            // The room's message callback reads the memberships used for broadcasts and finds any
+            // bot webhook recipients after the fragment has been rendered into cache.
+            _ = try connection.rows("SELECT id, user_id, unread_at FROM memberships WHERE room_id=? AND involvement!='invisible' AND unread_at IS NOT NULL", bindings: [.integer(storedRoomID)])
+            _ = try connection.rows("SELECT DISTINCT u.id FROM users u INNER JOIN memberships m ON m.user_id=u.id WHERE m.room_id=? AND u.status=0 AND u.role=2", bindings: [.integer(storedRoomID)]).compactMap { $0.integer(0) }
+            return rendered
+        }
 
         let roomKind = roomType == "Rooms::Direct" ? "rooms_direct" : (roomType == "Rooms::Closed" ? "rooms_closed" : "rooms_open")
-        let stream = "<turbo-stream action=\"append\" target=\"messages_\(roomKind)_\(storedRoomID)\"><template>\(rendered)</template></turbo-stream>"
-        var response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: stream)))
+        var stream = RenderBuffer()
+        stream.write("<turbo-stream action=\"append\" target=\"messages_\(roomKind)_\(storedRoomID)\"><template>")
+        stream.write(rendered.html)
+        stream.write("</template></turbo-stream>")
+        let streamBody = stream.finish()
+        var response = Response(status: .ok, body: streamBody.responseBody())
         response.headers[.contentType] = "text/vnd.turbo-stream.html; charset=utf-8"
         response.headers[HTTPField.Name("cache-control")!] = "max-age=0, private, must-revalidate"
-        response.headers[HTTPField.Name("etag")!] = etag(for: stream)
+        response.headers[HTTPField.Name("etag")!] = streamBody.etag()
         response.headers[.vary] = "Accept"
         SessionPipeline.appendRefreshCookie(session, to: &response)
         return response
@@ -186,30 +187,27 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
 
         let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
         let beforeID = request.uri.queryParameters["before"].flatMap { Int64($0) }
-        let page = try await Task.detached { () throws -> (String?, [MessageVersion]) in
-            try database.read { connection in
-                let room = try connection.firstRow("SELECT r.name FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
-                guard let roomName = room?.string(0) else { return (nil, []) }
+        let page = try await database.readAsync { connection -> (String?, [MessageVersion], [MessageFragment]) in
+            let room = try connection.firstRow("SELECT r.name FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
+            guard let roomName = room?.string(0) else { return (nil, [], []) }
 
-                let messages: [SQLiteRow]
-                if let beforeID {
-                    guard let timestamp = try connection.firstRow("SELECT created_at FROM messages WHERE id=? AND room_id=? LIMIT 1", bindings: [.integer(beforeID), .integer(roomID)])?.string(0) else {
-                        return (roomName, [])
-                    }
-                    messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at, CAST(strftime('%s', created_at) AS INTEGER) * 1000 + CAST(substr(created_at || '.000', 21, 3) AS INTEGER) FROM messages WHERE room_id=? AND created_at < ? ORDER BY created_at DESC LIMIT 40", bindings: [.integer(roomID), .text(timestamp)])
-                } else {
-                    messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at, CAST(strftime('%s', created_at) AS INTEGER) * 1000 + CAST(substr(created_at || '.000', 21, 3) AS INTEGER) FROM (SELECT id, client_message_id, created_at, updated_at FROM messages WHERE room_id=? ORDER BY created_at DESC LIMIT 40) ORDER BY created_at ASC", bindings: [.integer(roomID)])
+            let messages: [SQLiteRow]
+            if let beforeID {
+                guard let timestamp = try connection.firstRow("SELECT created_at FROM messages WHERE id=? AND room_id=? LIMIT 1", bindings: [.integer(beforeID), .integer(roomID)])?.string(0) else {
+                    return (roomName, [], [])
                 }
-                let queriedVersions = messages.compactMap { row -> MessageVersion? in
-                    guard let id = row.integer(0), let created = row.string(2), let updated = row.string(3) else { return nil }
-                    return MessageVersion(id: id, createdAt: created, updatedAt: updated, createdAtMilliseconds: row.integer(4) ?? 0)
-                }
-                let versions = beforeID == nil ? queriedVersions : Array(queriedVersions.reversed())
-                return (roomName, versions)
+                messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at FROM messages WHERE room_id=? AND created_at < ? ORDER BY created_at DESC LIMIT 40", bindings: [.integer(roomID), .text(timestamp)])
+            } else {
+                messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at FROM messages WHERE room_id=? ORDER BY created_at DESC LIMIT 40", bindings: [.integer(roomID)])
             }
-        }.value
+            // Both pages are the 40 before a point, newest first; Rails reverses them.
+            let versions = try pageVersions(connection, newestFirst: messages)
+            guard !versions.isEmpty else { return (roomName, [], []) }
+            let fragments = try messageFragments(connection, versions: versions, fragmentCache: fragmentCache) { _ in (roomName, roomID) }
+            return (roomName, versions, fragments)
+        }
 
-        guard let roomName = page.0 else {
+        guard page.0 != nil else {
             var response = Response(status: .found)
             response.headers[.location] = "/"
             if let cookie = SessionPipeline.alertCookie("Room not found or inaccessible") {
@@ -219,21 +217,8 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         }
         guard !page.1.isEmpty else { return Response(status: .noContent) }
 
-        let output = try await Task.detached {
-            try database.read { connection -> String in
-                var buffer = RenderBuffer()
-                for version in page.1 {
-                    let key = messageFragmentKey(version)
-                    if let cached = fragmentCache.value(for: key) {
-                        buffer.write(cached)
-                    } else {
-                        let message = try loadMessage(connection, version: version, roomName: roomName, roomID: roomID)
-                        buffer.write(fragmentCache.insert(render(message: message), for: key))
-                    }
-                }
-                return buffer.finish()
-            }
-        }.value
+        var output = RenderBuffer()
+        for fragment in page.2 { output.write(fragment) }
 
         let cacheKeyVersions = page.1.map { "messages/\($0.id)-\(timestampMicroseconds($0.updatedAt))" }.joined(separator: "/")
         let validator = etag(for: "\(cacheKeyVersions)/messages/index")
@@ -243,7 +228,7 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         if ifNoneMatch(request.headers[HTTPField.Name("if-none-match")!], matches: validator) {
             response = Response(status: .notModified)
         } else {
-            response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: output)))
+            response = Response(status: .ok, body: output.finish().responseBody())
             response.headers[.contentType] = "text/html; charset=utf-8"
         }
         response.headers[HTTPField.Name("etag")!] = validator
@@ -260,21 +245,27 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
             return response
         }
         let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
-        let result = try await Task.detached {
-            try database.read { connection -> (SQLiteRow?, [MessageVersion], Bool) in
-                let room = try connection.firstRow("SELECT r.id, r.name, r.type, r.updated_at, r.creator_id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
-                guard room != nil else { return (nil, [], false) }
-                let messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at, CAST(strftime('%s', created_at) AS INTEGER) * 1000 + CAST(substr(created_at || '.000', 21, 3) AS INTEGER) FROM (SELECT id, client_message_id, created_at, updated_at FROM messages WHERE room_id=? ORDER BY created_at DESC LIMIT 40) ORDER BY created_at ASC", bindings: [.integer(roomID)])
-                let originalID = try connection.firstRow("SELECT id FROM rooms ORDER BY created_at ASC LIMIT 1")?.integer(0)
-                let hasOlderMessages = try connection.firstRow("SELECT 1 FROM messages WHERE room_id=? LIMIT 1 OFFSET 40", bindings: [.integer(roomID)]) != nil
-                return (room, messages.compactMap { row in
-                    guard let id = row.integer(0), let created = row.string(2), let updated = row.string(3) else { return nil }
-                    return MessageVersion(id: id, createdAt: created, updatedAt: updated, createdAtMilliseconds: row.integer(4) ?? 0)
-                }, originalID == roomID && !hasOlderMessages)
-            }
-        }.value
+        let lastRoomID = SidebarLayout.lastRoomCookie(request)
+        let result = try await database.readAsync { connection -> RoomPage? in
+            guard let room = try connection.firstRow("SELECT r.id, r.name, r.type, r.updated_at, r.creator_id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)]),
+                  let returnedID = room.integer(0) else { return nil }
+            let messages = try connection.rows("SELECT id, client_message_id, created_at, updated_at FROM messages WHERE room_id=? ORDER BY created_at DESC LIMIT 40", bindings: [.integer(roomID)])
+            let originalID = try connection.firstRow("SELECT id FROM rooms ORDER BY created_at ASC LIMIT 1")?.integer(0)
+            let hasOlderMessages = try connection.firstRow("SELECT 1 FROM messages WHERE room_id=? LIMIT 1 OFFSET 40", bindings: [.integer(roomID)]) != nil
+            let versions = try pageVersions(connection, newestFirst: messages)
+            let layout = try SidebarLayout.load(connection: connection, lastRoomCookie: lastRoomID, user: session.user)
+            let roomName = room.string(1) ?? ""
+            let fragments = try messageFragments(connection, versions: versions, fragmentCache: fragmentCache) { _ in (roomName, returnedID) }
+            let joinCode = originalID == roomID && !hasOlderMessages
+                ? try connection.firstRow("SELECT join_code FROM accounts ORDER BY id ASC LIMIT 1")?.string(0) ?? ""
+                : nil
+            let directNames = room.string(2) == "Rooms::Direct"
+                ? try connection.rows("SELECT u.name FROM memberships m INNER JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.user_id!=? AND u.status=0 ORDER BY u.name", bindings: [.integer(returnedID), .integer(session.user.id)]).compactMap { $0.string(0) }
+                : []
+            return RoomPage(room: room, id: returnedID, layout: layout, fragments: fragments, joinCode: joinCode, directNames: directNames)
+        }
 
-        guard let room = result.0, let returnedID = room.integer(0) else {
+        guard let result else {
             var response = Response(status: .found)
             response.headers[.location] = "/"
             if let cookie = SessionPipeline.alertCookie("Room not found or inaccessible") {
@@ -283,27 +274,11 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
             return response
         }
 
+        let room = result.room
+        let returnedID = result.id
         let flash = SessionPipeline.readFlash(request)
-        let layout = try await SidebarLayout.load(request: request, user: session.user, database: database)
-        var messageHTML = try await Task.detached {
-            try database.read { connection -> String in
-                var output = RenderBuffer()
-                for version in result.1 {
-                    let key = messageFragmentKey(version)
-                    if let cached = fragmentCache.value(for: key) { output.write(cached); continue }
-                    let message = try loadMessage(connection, version: version, roomName: room.string(1) ?? "", roomID: returnedID)
-                    let rendered = render(message: message)
-                    output.write(fragmentCache.insert(rendered, for: key))
-                }
-                return output.finish()
-            }
-        }.value
-        if result.2 {
-            let joinCode = try await Task.detached {
-                try database.read { try $0.firstRow("SELECT join_code FROM accounts ORDER BY id ASC LIMIT 1")?.string(0) ?? "" }
-            }.value
-            messageHTML = "<div id=\"system_welcome\" class=\"message message--formatted txt-align-center center\"><div class=\"message__body center\"><div class=\"message__body-content position-relative\"><p><strong>Welcome to Campfire</strong><br>To invite people to chat, share the join link below.</p><a href=\"/join/\(erbEscape(joinCode))\">\(erbEscape(joinCode))</a></div></div></div>" + messageHTML
-        }
+        let joinCode = result.joinCode
+        let welcomeHTML = joinCode.map { joinCode in "<div id=\"system_welcome\" class=\"message message--formatted txt-align-center center\"><div class=\"message__body center\"><div class=\"message__body-content position-relative\"><p><strong>Welcome to Campfire</strong><br>To invite people to chat, share the join link below.</p><a href=\"/join/\(erbEscape(joinCode))\">\(erbEscape(joinCode))</a></div></div></div>" }
 
         let roomName = room.string(1) ?? ""
         let direct = room.string(2) == "Rooms::Direct"
@@ -311,28 +286,24 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         let roomPath = direct ? "directs" : (room.string(2) == "Rooms::Closed" ? "closeds" : "opens")
         let displayName: String
         if direct {
-            let names = try await Task.detached {
-                try database.read { connection in
-                    try connection.rows("SELECT u.name FROM memberships m INNER JOIN users u ON u.id=m.user_id WHERE m.room_id=? AND m.user_id!=? AND u.status=0 ORDER BY u.name", bindings: [.integer(returnedID), .integer(session.user.id)]).compactMap { $0.string(0) }
-                }
-            }.value
-            displayName = names.isEmpty ? session.user.name : names.joined(separator: " and ")
+            displayName = result.directNames.isEmpty ? session.user.name : result.directNames.joined(separator: " and ")
         } else { displayName = roomName }
-        let secret = ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base"
-        let streamSigner = RailsTurboStreamSigner(secretKeyBase: secret)
-        let roomGID = Data("gid://campfire/\(room.string(2) ?? "Rooms::Open")/\(returnedID)".utf8).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-        let streamName = streamSigner.sign("\(roomGID):messages")
+        let roomGID = base64URL(Data("gid://campfire/\(room.string(2) ?? "Rooms::Open")/\(returnedID)".utf8).base64EncodedString(), padded: false)
+        let streamName = AppSecrets.turboStreamName("\(roomGID):messages")
         let origin = "http://\(request.head.authority ?? "localhost")"
         let head = "<meta name=\"turbo-cache-control\" content=\"no-preview\"><meta name=\"current-room-id\" content=\"\(returnedID)\">"
-        let nav = "<span class=\"btn btn--reversed btn--faux room--current\"><h1 class=\"room__contents txt-medium overflow-ellipsis\">\(direct ? "<span class=\"for-screen-reader\">Ping with</span>" : "")\(erbEscape(displayName))</h1></span><a class=\"btn\" data-room-id=\"\(returnedID)\" href=\"/rooms/\(roomPath)/\(returnedID)/edit\" style=\"view-transition-name: edit-room-\(returnedID)\"><img aria-hidden=\"true\" src=\"\(roomAsset("menu-dots-horizontal.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Settings for this \(direct ? "Ping" : "room")</span></a><span><span class=\"button_to_change_notifying\" data-controller=\"notifications\" data-notifications-attention-class=\"btn--pulsing\" data-notifications-subscriptions-url-value=\"/users/me/push_subscriptions\"><turbo-frame data-controller=\"turbo-frame\" data-action=\"notifications:ready@window-&gt;turbo-frame#load\" data-turbo-frame-url-param=\"/rooms/\(returnedID)/involvement\" id=\"involvement_\(roomKind)_\(returnedID)\"><button class=\"btn\" data-action=\"click-&gt;notifications#attemptToSubscribe\" data-notifications-target=\"bell\"><img aria-hidden=\"true\" src=\"\(roomAsset("notification-bell-loading.svg"))\" width=\"20\" height=\"20\"><img aria-hidden=\"true\" hidden=\"hidden\" src=\"\(roomAsset("notification-bell-alert.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Notification settings for this \(direct ? "Ping" : "room")</span></button></turbo-frame></span></span>"
-        let navWithDialog = nav.replacingOccurrences(of: "</span></span>", with: renderNotificationDialog(origin: origin) + "</span></span>")
+        let navPrefix = "<span class=\"btn btn--reversed btn--faux room--current\"><h1 class=\"room__contents txt-medium overflow-ellipsis\">\(direct ? "<span class=\"for-screen-reader\">Ping with</span>" : "")\(erbEscape(displayName))</h1></span><a class=\"btn\" data-room-id=\"\(returnedID)\" href=\"/rooms/\(roomPath)/\(returnedID)/edit\" style=\"view-transition-name: edit-room-\(returnedID)\"><img aria-hidden=\"true\" src=\"\(roomAsset("menu-dots-horizontal.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Settings for this \(direct ? "Ping" : "room")</span></a><span><span class=\"button_to_change_notifying\" data-controller=\"notifications\" data-notifications-attention-class=\"btn--pulsing\" data-notifications-subscriptions-url-value=\"/users/me/push_subscriptions\"><turbo-frame data-controller=\"turbo-frame\" data-action=\"notifications:ready@window-&gt;turbo-frame#load\" data-turbo-frame-url-param=\"/rooms/\(returnedID)/involvement\" id=\"involvement_\(roomKind)_\(returnedID)\"><button class=\"btn\" data-action=\"click-&gt;notifications#attemptToSubscribe\" data-notifications-target=\"bell\"><img aria-hidden=\"true\" src=\"\(roomAsset("notification-bell-loading.svg"))\" width=\"20\" height=\"20\"><img aria-hidden=\"true\" hidden=\"hidden\" src=\"\(roomAsset("notification-bell-alert.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Notification settings for this \(direct ? "Ping" : "room")</span></button></turbo-frame>"
+        // The notification dialog sits inside the bell's two closing spans.
+        let navWithDialog = navPrefix + renderNotificationDialog(origin: origin) + "</span></span>"
         let footer = renderComposer(roomID: returnedID, origin: origin)
-        let pageContent = renderMessageArea(roomID: returnedID, roomKind: roomKind, messagesHTML: messageHTML, loadedAt: timestampMicroseconds(room.string(3) ?? "") / 1000, streamName: streamName, origin: origin, user: session.user)
-        let body = SidebarRenderer.render(user: session.user, account: layout.account, lastRoomID: layout.lastRoomID, shared: [], directs: [], placeholders: [], canCreateRooms: false, flash: flash, pageTitle: displayName, pageHead: head, pageNav: navWithDialog, pageContent: pageContent, pageFooter: footer, pageBodyClass: "sidebar", lazySidebar: true)
-        var response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: body)))
+        let loadedAt = timestampMicroseconds(room.string(3) ?? "") / 1000
+        let body = SidebarRenderer.render(user: session.user, account: result.layout.account, lastRoomID: result.layout.lastRoomID, shared: [], directs: [], placeholders: [], canCreateRooms: false, flash: flash, pageTitle: displayName, pageHead: head, pageNav: navWithDialog, pageContentWriter: { buffer in
+            writeMessageArea(into: &buffer, roomID: returnedID, roomKind: roomKind, welcomeHTML: welcomeHTML, fragments: result.fragments, loadedAt: loadedAt, streamName: streamName, origin: origin, user: session.user)
+        }, pageFooter: footer, pageBodyClass: "sidebar", lazySidebar: true)
+        var response = Response(status: .ok, body: body.responseBody())
         response.headers[.contentType] = "text/html; charset=utf-8"
         response.headers[HTTPField.Name("cache-control")!] = "max-age=0, private, must-revalidate"
-        response.headers[HTTPField.Name("etag")!] = etag(for: body)
+        response.headers[HTTPField.Name("etag")!] = body.etag()
         if let cookie = lastRoomCookie(request: request, roomID: returnedID) {
             response.headers.append(HTTPField(name: .setCookie, value: cookie))
         }
@@ -340,6 +311,16 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         if let flashCookie = flash.setCookie { response.headers.append(HTTPField(name: .setCookie, value: flashCookie)) }
         return response
     }
+}
+
+private struct RoomPage: Sendable {
+    let room: SQLiteRow
+    let id: Int64
+    let layout: SidebarLayout
+    let fragments: [MessageFragment]
+    /// Present when the welcome banner shows: the original room with no older messages.
+    let joinCode: String?
+    let directNames: [String]
 }
 
 private func ifNoneMatch(_ header: String?, matches validator: String) -> Bool {
@@ -359,14 +340,7 @@ private enum MessagePushJobQueue {
     }
 }
 
-private func sqliteTimestamp() -> String {
-    let now = Date()
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-    let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: now)
-    let micros = Int((now.timeIntervalSince1970 - floor(now.timeIntervalSince1970)) * 1_000_000)
-    return String(format: "%04d-%02d-%02d %02d:%02d:%02d.%06d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0, parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0, micros)
-}
+private func sqliteTimestamp() -> String { UTCTime.sqliteNow() }
 
 private extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
@@ -410,13 +384,61 @@ func loadMessage(_ connection: SQLiteConnection, version: MessageVersion, roomNa
     return RoomMessage(id: version.id, clientMessageID: row?.string(5) ?? String(version.id), roomID: roomID, createdAt: version.createdAt, updatedAt: version.updatedAt, createdAtMilliseconds: version.createdAtMilliseconds, creatorID: creatorID, creatorName: row?.string(1) ?? "", creatorUpdatedAt: row?.string(2) ?? "", creatorTitle: [row?.string(1), row?.string(6)].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " – "), roomName: roomName, body: row?.string(3) ?? "", boosts: boosts)
 }
 
-func messageFragmentKey(_ message: MessageVersion) -> String {
-    let micros = timestampMicroseconds(message.updatedAt)
-    return "views/messages/_message:\(messageTemplateDigest)/messages/\(message.id)-\(micros)/presentation-v3"
+/// Message partial HTML for a page of versions, in order: cached fragments are fetched under one
+/// lock and only misses load their message rows and render.
+func messageFragments(_ connection: SQLiteConnection, versions: [MessageVersion], fragmentCache: MessageFragmentCache, room: (Int) -> (name: String, id: Int64)) throws -> [MessageFragment] {
+    let keys = versions.map(messageFragmentKey)
+    let cached = fragmentCache.values(for: keys)
+    var fragments: [MessageFragment] = []
+    fragments.reserveCapacity(versions.count)
+    for index in versions.indices {
+        if let html = cached[index] { fragments.append(html); continue }
+        let (roomName, roomID) = room(index)
+        let message = try loadMessage(connection, version: versions[index], roomName: roomName, roomID: roomID)
+        fragments.append(fragmentCache.insert(render(message: message), for: keys[index]))
+    }
+    return fragments
 }
+
+/// Message versions oldest first from rows `id, client_message_id, created_at, updated_at`
+/// queried newest first.
+private func pageVersions(_ connection: SQLiteConnection, newestFirst rows: [SQLiteRow]) throws -> [MessageVersion] {
+    try rows.reversed().compactMap { row -> MessageVersion? in
+        guard let id = row.integer(0), let created = row.string(2), let updated = row.string(3) else { return nil }
+        return MessageVersion(id: id, createdAt: created, updatedAt: updated, createdAtMilliseconds: try sqliteEpochMilliseconds(connection, created))
+    }
+}
+
+/// The epoch milliseconds the message partial shows (`data-message-timestamp`), as SQLite computes them.
+private func sqliteEpochMilliseconds(_ connection: SQLiteConnection, _ timestamp: String) throws -> Int64 {
+    if let value = UTCTime.sqliteEpochMilliseconds(timestamp) { return value }
+    return try connection.firstRow("SELECT CAST(strftime('%s', ?1) AS INTEGER) * 1000 + CAST(substr(?1 || '.000', 21, 3) AS INTEGER)", bindings: [.text(timestamp)])?.integer(0) ?? 0
+}
+
+/// `views/messages/_message:<template digest>/messages/<id>-<updated_at µs>/presentation-v3`;
+/// the template digest is fixed for the process, so the message and its version identify it.
+struct MessageFragmentKey: Hashable, Sendable {
+    let messageID: Int64
+    let updatedAtMicroseconds: Int64
+    /// The bytes the Rails cache key would take, for the cache's byte budget.
+    var byteCount: Int { 64 + String(messageID).utf8.count + String(updatedAtMicroseconds).utf8.count }
+}
+
+func messageFragmentKey(_ message: MessageVersion) -> MessageFragmentKey {
+    MessageFragmentKey(messageID: message.id, updatedAtMicroseconds: timestampMicroseconds(message.updatedAt))
+}
+
+private let roomAssetPaths = BoundedCache<String, String>(limit: 4_096)
 
 func roomAsset(_ logicalName: String) -> String {
     if let exact = AssetManifest.assets[logicalName] { return exact }
+    if let cached = roomAssetPaths.value(for: logicalName) { return cached }
+    let path = resolveRoomAsset(logicalName)
+    roomAssetPaths.insert(path, for: logicalName)
+    return path
+}
+
+private func resolveRoomAsset(_ logicalName: String) -> String {
     let basename = URL(fileURLWithPath: logicalName).lastPathComponent
     guard let asset = AssetManifest.assets[basename], logicalName.contains("/") else {
         return "/assets/\(logicalName)"
@@ -424,7 +446,6 @@ func roomAsset(_ logicalName: String) -> String {
     return asset.replacingOccurrences(of: "/assets/", with: "/assets/\(logicalName.dropLast(basename.count))")
 }
 
-private let messageTemplateDigest = hexEncoded(SHA256.hash(data: Data("messages/_message|presentation|actions|boosts|action-text-renderer-v1".utf8))).prefix(32)
 
 func isoTimestamp(_ value: String) -> String {
     let normalized = value.replacingOccurrences(of: " ", with: "T")
@@ -436,10 +457,8 @@ func timestampMicroseconds(_ value: String) -> Int64 {
 }
 
 func render(message: RoomMessage) -> String {
-    let secret = ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base"
-    let avatarToken = RailsSignedID(secretKeyBase: secret).generate(model: "User", id: Int(message.creatorID), purpose: "avatar")
-    let avatar = "/users/\(avatarToken)/avatar?v=\(message.creatorUpdatedAt.filter(\.isNumber).prefix(14))"
-    let safeBody = ActionTextRenderer(secretKeyBase: secret).render(message.body)
+    let avatar = AvatarTokens.path(userID: message.creatorID, updatedAt: message.creatorUpdatedAt)
+    let safeBody = AppSecrets.actionText.render(message.body)
     let escapedCreator = erbEscape(message.creatorName)
     let escapedTitle = erbEscape(message.creatorTitle)
     let escapedRoom = erbEscape(message.roomName)
@@ -453,18 +472,15 @@ func render(message: RoomMessage) -> String {
 }
 
 private func renderBoost(_ boost: RoomBoost) -> String {
-    let secret = ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base"
-    let avatarToken = RailsSignedID(secretKeyBase: secret).generate(model: "User", id: Int(boost.creatorID), purpose: "avatar")
-    let avatar = "/users/\(avatarToken)/avatar?v=\(boost.creatorUpdatedAt.filter(\.isNumber).prefix(14))"
+    let avatar = AvatarTokens.path(userID: boost.creatorID, updatedAt: boost.creatorUpdatedAt)
     let title = erbEscape(boost.creatorTitle)
     let content = erbEscape(boost.content)
     let textClass = boost.content.unicodeScalars.allSatisfy { $0.properties.isEmoji } ? "txt-small txt-medium" : "txt-small"
     return "<div id=\"boost_\(boost.id)\" class=\"boost boost-item flex-inline postion--relative max-width align-center fill-white gap\" data-controller=\"boost-delete\" data-boost-delete-perform-class=\"boost--deleting\" data-boost-delete-reveal-class=\"expanded\" data-boost-delete-booster-id-value=\"\(boost.creatorID)\"><figure class=\"avatar boost__avatar flex-item-no-shrink\"><a title=\"\(title)\" class=\"btn avatar\" data-turbo-frame=\"_top\" href=\"/users/\(boost.creatorID)\"><img aria-label=\"\(title) boosted \(content)\" src=\"\(avatar)\" width=\"48\" height=\"48\" /></a></figure><span role=\"button\" class=\"\(textClass)\" data-action=\"click-&gt;boost-delete#reveal keydown.enter-&gt;boost-delete#reveal:prevent\" data-boost-delete-target=\"content\">\(content)</span><form class=\"button_to\" method=\"post\" action=\"/messages/\(boost.messageID)/boosts/\(boost.id)\"><input type=\"hidden\" name=\"_method\" value=\"delete\" /><button data-action=\"boost-delete#perform\" data-boost-delete-target=\"button\" class=\"btn btn--negative flex-item-justify-end boost__delete\" type=\"submit\"><img aria-hidden=\"true\" src=\"\(roomAsset("minus.svg"))\" width=\"20\" height=\"20\" /><span class=\"for-screen-reader\">Delete this boost</span></button></form></div><span id=\"delete_boost_accessible_label\" class=\"for-screen-reader\">Press enter to delete this boost</span>"
 }
 
-private func renderMessageArea(roomID: Int64, roomKind: String, messagesHTML: String, loadedAt: Int64, streamName: String, origin: String, user: SignedInUser) -> String {
-    let secret = ProcessInfo.processInfo.environment["SECRET_KEY_BASE"] ?? "campfire-swift-development-secret-key-base"
-    let userAvatar = "/users/\(RailsSignedID(secretKeyBase: secret).generate(model: "User", id: Int(user.id), purpose: "avatar"))/avatar?v=\(user.updatedAt.filter(\.isNumber).prefix(14))"
+private func writeMessageArea(into buffer: inout RenderBuffer, roomID: Int64, roomKind: String, welcomeHTML: String?, fragments: [MessageFragment], loadedAt: Int64, streamName: String, origin: String, user: SignedInUser) {
+    let userAvatar = AvatarTokens.path(userID: user.id, updatedAt: user.updatedAt)
     let template = """
     <script type="text/template" data-messages-target="template">
       <div class="message message--me $messageClasses$"
@@ -501,7 +517,10 @@ private func renderMessageArea(roomID: Int64, roomKind: String, messagesHTML: St
       </div>
     </script>
     """
-    return "<div id=\"message-area\" class=\"message-area\" contents=\"true\" data-controller=\"messages presence drop-target\" data-action=\"turbo:before-stream-render@document-&gt;messages#beforeStreamRender keydown.up@document-&gt;messages#editMyLastMessage dragenter-&gt;drop-target#dragenter dragover-&gt;drop-target#dragover drop-&gt;drop-target#drop visibilitychange@document-&gt;presence#visibilityChanged\" data-messages-first-of-day-class=\"message--first-of-day\" data-messages-formatted-class=\"message--formatted\" data-messages-me-class=\"message--me\" data-messages-mentioned-class=\"message--mentioned\" data-messages-threaded-class=\"message--threaded\" data-messages-page-url-value=\"\(origin)/rooms/\(roomID)/messages\">\(template)<div id=\"messages_\(roomKind)_\(roomID)\" class=\"messages\" data-controller=\"maintain-scroll refresh-room\" data-action=\"turbo:before-stream-render@document-&gt;maintain-scroll#beforeStreamRender visibilitychange@document-&gt;refresh-room#visibilityChanged online@window-&gt;refresh-room#online\" data-messages-target=\"messages\" data-refresh-room-loaded-at-value=\"\(loadedAt)\" data-refresh-room-url-value=\"\(origin)/rooms/\(roomID)/refresh\">\(messagesHTML)</div><turbo-cable-stream-source channel=\"RoomMessagesChannel\" signed-stream-name=\"\(streamName)\"></turbo-cable-stream-source><button class=\"message-area__return-to-latest btn\" data-action=\"messages#returnToLatest\" data-messages-target=\"latest\" hidden=\"hidden\"><img aria-hidden=\"true\" src=\"\(roomAsset("arrow-down.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Jump to newest message</span></button></div>"
+    buffer.write("<div id=\"message-area\" class=\"message-area\" contents=\"true\" data-controller=\"messages presence drop-target\" data-action=\"turbo:before-stream-render@document-&gt;messages#beforeStreamRender keydown.up@document-&gt;messages#editMyLastMessage dragenter-&gt;drop-target#dragenter dragover-&gt;drop-target#dragover drop-&gt;drop-target#drop visibilitychange@document-&gt;presence#visibilityChanged\" data-messages-first-of-day-class=\"message--first-of-day\" data-messages-formatted-class=\"message--formatted\" data-messages-me-class=\"message--me\" data-messages-mentioned-class=\"message--mentioned\" data-messages-threaded-class=\"message--threaded\" data-messages-page-url-value=\"\(origin)/rooms/\(roomID)/messages\">\(template)<div id=\"messages_\(roomKind)_\(roomID)\" class=\"messages\" data-controller=\"maintain-scroll refresh-room\" data-action=\"turbo:before-stream-render@document-&gt;maintain-scroll#beforeStreamRender visibilitychange@document-&gt;refresh-room#visibilityChanged online@window-&gt;refresh-room#online\" data-messages-target=\"messages\" data-refresh-room-loaded-at-value=\"\(loadedAt)\" data-refresh-room-url-value=\"\(origin)/rooms/\(roomID)/refresh\">")
+    if let welcomeHTML { buffer.write(welcomeHTML) }
+    for fragment in fragments { buffer.write(fragment) }
+    buffer.write("</div><turbo-cable-stream-source channel=\"RoomMessagesChannel\" signed-stream-name=\"\(streamName)\"></turbo-cable-stream-source><button class=\"message-area__return-to-latest btn\" data-action=\"messages#returnToLatest\" data-messages-target=\"latest\" hidden=\"hidden\"><img aria-hidden=\"true\" src=\"\(roomAsset("arrow-down.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Jump to newest message</span></button></div>")
 }
 
 private func renderNotificationDialog(origin: String) -> String {
@@ -521,15 +540,7 @@ private func renderComposer(roomID: Int64, origin: String) -> String {
 }
 
 private func lastRoomCookie(request: Request, roomID: Int64) -> String? {
-    let current = request.headers[.cookie]?.split(separator: ";").compactMap { item -> String? in
-        let pair = item.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-        return pair.count == 2 && pair[0] == "last_room" ? String(pair[1]) : nil
-    }.first
+    let current = RequestCookies.trimmedItemValue("last_room", in: request.headers[.cookie])
     guard current != String(roomID) else { return nil }
-    let expiry = Calendar(identifier: .gregorian).date(byAdding: .year, value: 20, to: Date()) ?? Date()
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
-    return "last_room=\(roomID); path=/; expires=\(formatter.string(from: expiry)); samesite=lax"
+    return "last_room=\(roomID); path=/; expires=\(UTCTime.httpDate(UTCTime.twentyYearsFromNow())); samesite=lax"
 }

@@ -141,6 +141,33 @@ final class MessagePostingTests: XCTestCase {
         }
     }
 
+    /// Message timestamps are computed in Swift for Rails' shape; SQLite's expression is the oracle.
+    func testMessageTimestampMillisecondsMatchSQLite() async throws {
+        try await withSeed { databasePath, _ in
+            let database = try SQLiteDatabase(path: databasePath)
+            var generator = SystemRandomNumberGenerator()
+            var values = ["2026-01-01 00:00:00", "2026-01-01 00:00:00.9999999", "2024-02-29 23:59:59.999500", "1970-01-01 00:00:00.000",
+                          "2026-01-01 00:00:00.5", "2026-01-01 00:00:00.12", "2026-01-01T00:00:00.123456", "2026-01-01 00:00:00.123456Z",
+                          "2023-02-29 00:00:00.000000", "1969-12-31 23:59:59.999999", "", "not a time"]
+            for _ in 0..<5_000 {
+                let fraction = String((0..<Int.random(in: 3...9, using: &generator)).map { _ in "0123456789".randomElement(using: &generator)! })
+                values.append(String(format: "%04d-%02d-%02d %02d:%02d:%02d.", Int.random(in: 1970...2400, using: &generator), Int.random(in: 1...12, using: &generator),
+                                     Int.random(in: 1...28, using: &generator), Int.random(in: 0...23, using: &generator), Int.random(in: 0...59, using: &generator),
+                                     Int.random(in: 0...59, using: &generator)) + fraction)
+            }
+            let expected = try database.read { connection in
+                try values.map { try connection.firstRow("SELECT CAST(strftime('%s', ?1) AS INTEGER) * 1000 + CAST(substr(?1 || '.000', 21, 3) AS INTEGER)", bindings: [.text($0)])?.integer(0) }
+            }
+            var fast = 0
+            for (value, sqlite) in zip(values, expected) {
+                guard let computed = UTCTime.sqliteEpochMilliseconds(value) else { continue }
+                XCTAssertEqual(computed, sqlite, value)
+                fast += 1
+            }
+            XCTAssertGreaterThan(fast, 4_900)
+        }
+    }
+
     private func withSeed(_ body: (String, URL) async throws -> Void) async throws {
         let source = seedDirectory
         guard FileManager.default.fileExists(atPath: source.appending(path: "db/production.sqlite3").path),

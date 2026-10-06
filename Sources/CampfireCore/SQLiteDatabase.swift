@@ -75,10 +75,20 @@ private final class SQLiteWorker: @unchecked Sendable {
 
     deinit { state.stop() }
 
+    /// Queues `job` without waiting for it.
+    func submit(_ job: @escaping () -> Void) { state.enqueue(job) }
+
     func perform<T>(_ work: @escaping () throws -> T) throws -> T {
         let result = SQLiteWorkerResult<T>()
         state.enqueue { result.complete(Result { try work() }) }
         return try result.wait()
+    }
+
+    /// Runs `work` on the worker thread while the caller's task is suspended, not its thread.
+    func perform<T: Sendable>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            state.enqueue { continuation.resume(with: Result { try work() }) }
+        }
     }
 }
 
@@ -108,7 +118,9 @@ public final class SQLiteConnection: @unchecked Sendable {
 
     fileprivate init(path: String, queryOnly: Bool) throws {
         var database: OpaquePointer?
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        // Each connection is used by one thread at a time (a reader lock, or its own worker
+        // thread), so SQLite's per-connection mutex is redundant.
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
         let result = sqlite3_open_v2(path, &database, flags, nil)
         guard result == SQLITE_OK, let database else {
             let message = database.map { String(cString: sqlite3_errmsg($0)) } ?? "unable to allocate SQLite handle"
@@ -255,8 +267,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private var readerCursor = 0
     private let checkpointer: SQLiteConnection
     private let checkpointerWorker: SQLiteWorker
-    private let checkpointTimer: DispatchSourceTimer
-    private var lastCheckpointWalBytes = 0
+    private let wal = WALMonitor()
     private let databasePath: String
 
     public init(path: String, readerCount: Int = Int(ProcessInfo.processInfo.environment["RAILS_MAX_THREADS"] ?? "8") ?? 8, writeQueueCapacity: Int = 256) throws {
@@ -275,14 +286,11 @@ public final class SQLiteDatabase: @unchecked Sendable {
         if try writer.firstRow("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'") != nil {
             try writer.execute("CREATE INDEX IF NOT EXISTS index_messages_on_room_id_and_created_at ON messages(room_id, created_at)")
         }
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "campfire.database.checkpoint-watch", qos: .utility))
-        checkpointTimer = timer
-        timer.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
-        timer.setEventHandler { [weak self] in self?.checkpointIfNeeded() }
-        timer.resume()
+        sqlite3_wal_hook(writer.handle, { context, _, _, pages in
+            Unmanaged<WALMonitor>.fromOpaque(context!).takeUnretainedValue().pages = pages
+            return SQLITE_OK
+        }, Unmanaged.passUnretained(wal).toOpaque())
     }
-
-    deinit { checkpointTimer.cancel() }
 
     private static let configureSQLite: Int32 = campfire_sqlite_config_multithread()
     public static var version: String { String(cString: sqlite3_libversion()) }
@@ -290,61 +298,120 @@ public final class SQLiteDatabase: @unchecked Sendable {
 
     /// Runs synchronously on one of the fixed reader connections. Call from a worker, not an event loop.
     public func read<T>(_ body: @escaping (SQLiteConnection) throws -> T) throws -> T {
-        for index in readers.indices where readerLocks[index].try() {
-            defer { readerLocks[index].unlock() }
-            return try body(readers[index])
-        }
-        nextReader.lock()
-        let index = readerCursor
-        readerCursor = (readerCursor + 1) % readers.count
-        nextReader.unlock()
+        if let inline = readOnFreeConnection(body) { return try inline.get() }
+        let index = nextReaderIndex()
         return try readerWorkers[index].perform {
             self.readerLocks[index].lock(); defer { self.readerLocks[index].unlock() }
             return try body(self.readers[index])
         }
     }
 
-    /// Runs a serialized immediate transaction. After-commit hooks receive the writer connection
-    /// after COMMIT and run in insertion order before the next write is dequeued.
-    public func write<T>(_ body: @escaping (SQLiteConnection, inout [(SQLiteConnection) throws -> Void]) throws -> T) throws -> T {
-        return try writerWorker.perform {
-            try self.writer.execute("BEGIN IMMEDIATE")
-            var hooks: [(SQLiteConnection) throws -> Void] = []
-            let value: T
-            do {
-                value = try body(self.writer, &hooks)
-                try self.writer.execute("COMMIT")
-            } catch {
-                try? self.writer.execute("ROLLBACK")
-                throw error
-            }
-            var afterCommitError: Error?
-            for hook in hooks {
-                do { try hook(self.writer) }
-                catch { afterCommitError = afterCommitError ?? error }
-            }
-            self.restartWALIfNeeded()
-            if let afterCommitError { throw afterCommitError }
-            return value
+    /// `read` for async callers: a busy pool suspends the task instead of blocking its thread.
+    public func readAsync<T: Sendable>(_ body: @escaping (SQLiteConnection) throws -> T) async throws -> T {
+        if let inline = readOnFreeConnection(body) { return try inline.get() }
+        let index = nextReaderIndex()
+        return try await readerWorkers[index].perform {
+            self.readerLocks[index].lock(); defer { self.readerLocks[index].unlock() }
+            return try body(self.readers[index])
         }
     }
 
-    private func checkpointIfNeeded() {
-        let walPath = databasePath + "-wal"
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: walPath),
-              let size = attributes[.size] as? NSNumber else { return }
-        let pages = size.intValue / 4096
-        guard pages >= 1000, size.intValue - lastCheckpointWalBytes >= 1000 * 4096 else { return }
-        _ = try? checkpointerWorker.perform { try self.checkpointer.execute("PRAGMA wal_checkpoint(PASSIVE)") }
-        lastCheckpointWalBytes = size.intValue
+    /// Runs `body` on the calling thread when a reader connection is free; nil when none is.
+    private func readOnFreeConnection<T>(_ body: (SQLiteConnection) throws -> T) -> Result<T, Error>? {
+        for index in readers.indices where readerLocks[index].try() {
+            defer { readerLocks[index].unlock() }
+            return Result { try body(readers[index]) }
+        }
+        return nil
     }
 
-    private func restartWALIfNeeded() {
-        let walPath = databasePath + "-wal"
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: walPath),
-              let size = attributes[.size] as? NSNumber, size.intValue / 4096 >= 10_000 else { return }
-        try? writer.execute("PRAGMA wal_checkpoint(RESTART)")
+    private func nextReaderIndex() -> Int {
+        nextReader.lock(); defer { nextReader.unlock() }
+        let index = readerCursor
+        readerCursor = (readerCursor + 1) % readers.count
+        return index
     }
+
+    /// `write` for async callers: the task waits for the writer without holding a thread, so
+    /// other requests keep running while writes queue.
+    public func writeAsync<T: Sendable>(_ body: @escaping (SQLiteConnection, inout [(SQLiteConnection) throws -> Void]) throws -> T) async throws -> T {
+        try await writerWorker.perform { try self.runWrite(body) }
+    }
+
+    /// Runs a serialized immediate transaction. After-commit hooks receive the writer connection
+    /// after COMMIT and run in insertion order before the next write is dequeued.
+    public func write<T>(_ body: @escaping (SQLiteConnection, inout [(SQLiteConnection) throws -> Void]) throws -> T) throws -> T {
+        try writerWorker.perform { try self.runWrite(body) }
+    }
+
+    private func runWrite<T>(_ body: (SQLiteConnection, inout [(SQLiteConnection) throws -> Void]) throws -> T) throws -> T {
+        try writer.execute("BEGIN IMMEDIATE")
+        var hooks: [(SQLiteConnection) throws -> Void] = []
+        let value: T
+        do {
+            value = try body(writer, &hooks)
+            try writer.execute("COMMIT")
+        } catch {
+            try? writer.execute("ROLLBACK")
+            throw error
+        }
+        var afterCommitError: Error?
+        for hook in hooks {
+            do { try hook(writer) }
+            catch { afterCommitError = afterCommitError ?? error }
+        }
+        manageWAL()
+        if let afterCommitError { throw afterCommitError }
+        return value
+    }
+
+    /// Checkpoints in place of SQLite's auto-checkpoint. The WAL hook reports the log's size in
+    /// pages after each commit: every 1,000 pages it grows wakes the checkpointer for a PASSIVE
+    /// checkpoint while writes continue, and at 10,000 pages the writer itself runs RESTART (after
+    /// any running PASSIVE checkpoint, which SQLite would otherwise refuse it for) so that the next
+    /// write starts the log over. Runs on the writer thread after each write.
+    private func manageWAL() {
+        let pages = Int(wal.pages)
+        wal.pages = 0
+        guard pages > 0 else { return }
+        if pages >= 10_000 {
+            wal.checkpointRunning.lock()
+            try? writer.execute("PRAGMA wal_checkpoint(RESTART)")
+            wal.checkpointRunning.unlock()
+            return
+        }
+        if pages < wal.wokenAt { wal.wokenAt = 0 }
+        guard pages - wal.wokenAt >= 1_000, wal.claimCheckpoint() else { return }
+        wal.wokenAt = pages
+        checkpointerWorker.submit {
+            self.wal.checkpointRunning.lock()
+            try? self.checkpointer.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            self.wal.checkpointRunning.unlock()
+            self.wal.finishCheckpoint()
+        }
+    }
+}
+
+/// WAL bookkeeping shared by the writer thread and the checkpointer.
+private final class WALMonitor: @unchecked Sendable {
+    /// Pages in the log after the writer's latest commit (writer thread only).
+    var pages: Int32 = 0
+    /// The log's size when the checkpointer was last woken (writer thread only).
+    var wokenAt = 0
+    /// Held while a checkpoint runs; SQLite runs one at a time.
+    let checkpointRunning = NSLock()
+    private let lock = NSLock()
+    private var queued = false
+
+    /// Whether a checkpoint may be queued now; one is queued or running at a time.
+    func claimCheckpoint() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if queued { return false }
+        queued = true
+        return true
+    }
+
+    func finishCheckpoint() { lock.lock(); queued = false; lock.unlock() }
 }
 
 public enum SQLiteError: Error, CustomStringConvertible {

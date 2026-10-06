@@ -28,39 +28,27 @@ func installSearchRoutes(on router: Router<BasicRequestContext>, database: SQLit
         let query = rawQuery.map(sanitizeSearchQuery)
         let searchableTerms = query.map(ftsLiteralTerms).flatMap { $0.isEmpty ? nil : $0 }
         let cookieRoomID = searchCookieInteger("last_room", request.headers[.cookie])
-        let data = try await Task.detached {
-            try database.read { connection -> SearchPageData in
-                let messages: [SearchResultMessage]
-                if let searchableTerms, !searchableTerms.isEmpty {
-                    let rows = try connection.rows("SELECT m.id, m.created_at, m.updated_at, CAST(strftime('%s', m.created_at) AS INTEGER) * 1000 + CAST(substr(strftime('%f', m.created_at), 4, 3) AS INTEGER), r.id, r.name FROM messages m INNER JOIN rooms r ON r.id=m.room_id INNER JOIN memberships membership ON membership.room_id=r.id INNER JOIN message_search_index idx ON idx.rowid=m.id WHERE membership.user_id=? AND idx.body MATCH ? ORDER BY m.created_at DESC LIMIT 100", bindings: [.integer(session.user.id), .text(searchableTerms)])
-                    messages = rows.compactMap { row -> SearchResultMessage? in
-                        guard let id = row.integer(0), let createdAt = row.string(1), let updatedAt = row.string(2), let roomID = row.integer(4) else { return nil }
-                        return SearchResultMessage(version: MessageVersion(id: id, createdAt: createdAt, updatedAt: updatedAt, createdAtMilliseconds: row.integer(3) ?? 0), roomID: roomID, roomName: row.string(5) ?? "")
-                    }.reversed()
-                } else {
-                    messages = []
-                }
-                let recents = try connection.rows("SELECT query FROM searches WHERE user_id=? ORDER BY updated_at DESC", bindings: [.integer(session.user.id)]).compactMap { $0.string(0) }
-                let returnToRoom = try connection.firstRow("SELECT r.id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE m.user_id=? AND r.id=? LIMIT 1", bindings: [.integer(session.user.id), .integer(cookieRoomID ?? 0)])?.integer(0)
-                    ?? connection.firstRow("SELECT r.id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE m.user_id=? ORDER BY r.created_at ASC LIMIT 1", bindings: [.integer(session.user.id)])?.integer(0)
-                    ?? 0
-                return SearchPageData(query: query.flatMap { $0.contains(where: { !$0.isWhitespace }) ? $0 : nil }, messages: messages, recentSearches: recents, returnToRoomID: returnToRoom)
+        let lastRoomCookie = SidebarLayout.lastRoomCookie(request)
+        let (data, messageFragments, layout) = try await database.readAsync { connection -> (SearchPageData, [MessageFragment], SidebarLayout) in
+            let messages: [SearchResultMessage]
+            if let searchableTerms, !searchableTerms.isEmpty {
+                let rows = try connection.rows("SELECT m.id, m.created_at, m.updated_at, CAST(strftime('%s', m.created_at) AS INTEGER) * 1000 + CAST(substr(strftime('%f', m.created_at), 4, 3) AS INTEGER), r.id, r.name FROM messages m INNER JOIN rooms r ON r.id=m.room_id INNER JOIN memberships membership ON membership.room_id=r.id INNER JOIN message_search_index idx ON idx.rowid=m.id WHERE membership.user_id=? AND idx.body MATCH ? ORDER BY m.created_at DESC LIMIT 100", bindings: [.integer(session.user.id), .text(searchableTerms)])
+                messages = rows.compactMap { row -> SearchResultMessage? in
+                    guard let id = row.integer(0), let createdAt = row.string(1), let updatedAt = row.string(2), let roomID = row.integer(4) else { return nil }
+                    return SearchResultMessage(version: MessageVersion(id: id, createdAt: createdAt, updatedAt: updatedAt, createdAtMilliseconds: row.integer(3) ?? 0), roomID: roomID, roomName: row.string(5) ?? "")
+                }.reversed()
+            } else {
+                messages = []
             }
-        }.value
-
-        let messageHTML = try await Task.detached {
-            try database.read { connection -> String in
-                var output = RenderBuffer()
-                for result in data.messages {
-                    let version = result.version
-                    let key = messageFragmentKey(version)
-                    if let cached = fragmentCache.value(for: key) { output.write(cached); continue }
-                    let message = try loadMessage(connection, version: version, roomName: result.roomName, roomID: result.roomID)
-                    output.write(fragmentCache.insert(render(message: message), for: key))
-                }
-                return output.finish()
-            }
-        }.value
+            let recents = try connection.rows("SELECT query FROM searches WHERE user_id=? ORDER BY updated_at DESC", bindings: [.integer(session.user.id)]).compactMap { $0.string(0) }
+            let returnToRoom = try connection.firstRow("SELECT r.id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE m.user_id=? AND r.id=? LIMIT 1", bindings: [.integer(session.user.id), .integer(cookieRoomID ?? 0)])?.integer(0)
+                ?? connection.firstRow("SELECT r.id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE m.user_id=? ORDER BY r.created_at ASC LIMIT 1", bindings: [.integer(session.user.id)])?.integer(0)
+                ?? 0
+            let data = SearchPageData(query: query.flatMap { $0.contains(where: { !$0.isWhitespace }) ? $0 : nil }, messages: messages, recentSearches: recents, returnToRoomID: returnToRoom)
+            let fragments = try CampfireCore.messageFragments(connection, versions: messages.map(\.version), fragmentCache: fragmentCache) { index in (messages[index].roomName, messages[index].roomID) }
+            let layout = try SidebarLayout.load(connection: connection, lastRoomCookie: lastRoomCookie, user: session.user)
+            return (data, fragments, layout)
+        }
 
         let queryNav: String
         if let query = data.query {
@@ -70,15 +58,18 @@ func installSearchRoutes(on router: Router<BasicRequestContext>, database: SQLit
         let recents = renderRecentSearches(data.recentSearches, origin: origin)
         let pageNav = queryNav + "<div class=\"searches__recents align-center gap pad-block-half overflow-y overflow-hide-scrollbar\">\(recents)</div>"
         let sidebar = "<div class=\"rooms position-relative flex flex-column gap overflow-y overflow-hide-scrollbar\">\(recents)</div>"
-        let pageContent = "<div id=\"message-area\" class=\"message-area\"><div class=\"message-area--empty min-width center\"><figure class=\"center pad\"><img aria-hidden=\"true\" class=\"colorize--black translucent\" src=\"\(roomAsset("search.svg"))\" /></figure></div><div id=\"search-results\" class=\"messages searches__results\" data-controller=\"search-results\" data-search-results-target=\"messages\" data-search-results-me-class=\"message--me\" data-search-results-threaded-class=\"message--threaded\" data-search-results-mentioned-class=\"message--mentioned\" data-search-results-formatted-class=\"message--formatted\">\(messageHTML)</div></div>"
+        let pageContentPrefix = "<div id=\"message-area\" class=\"message-area\"><div class=\"message-area--empty min-width center\"><figure class=\"center pad\"><img aria-hidden=\"true\" class=\"colorize--black translucent\" src=\"\(roomAsset("search.svg"))\" /></figure></div><div id=\"search-results\" class=\"messages searches__results\" data-controller=\"search-results\" data-search-results-target=\"messages\" data-search-results-me-class=\"message--me\" data-search-results-threaded-class=\"message--threaded\" data-search-results-mentioned-class=\"message--mentioned\" data-search-results-formatted-class=\"message--formatted\">"
         let pageFooter = "<div class=\"composer flex align-end gap\"><a class=\"btn flex-item-no-shrink margin-block-end\" style=\"view-transition-name: input-switcher; --btn-border-radius: 0.5em\" href=\"/rooms/\(data.returnToRoomID)\"><img aria-hidden=\"true\" src=\"\(roomAsset("arrow-left.svg"))\" /><span class=\"for-screen-reader\">Exit search </span></a><form class=\"margin-block flex-item-grow contain flex align-center gap\" data-controller=\"form\" data-action=\"keydown.esc-&gt;form#cancel\" action=\"/searches\" accept-charset=\"UTF-8\" method=\"post\"><div class=\"composer__input flex align-center flex-item-grow gap full-width input input--actor min-width\"><img aria-hidden=\"true\" class=\"composer__input-hint colorize--black\" style=\"view-transition-name: input-btn;\" src=\"\(roomAsset("search.svg"))\" width=\"20\" height=\"20\" /><input\(rawQuery.map { " value=\"\(erbEscape($0))\"" } ?? "") class=\"searches__input input flex-item-grow\" role=\"searchbox\" aria-label=\"search\" autofocus=\"autofocus\" required=\"required\" type=\"text\" name=\"q\" id=\"q\" /><a data-form-target=\"cancel\" role=\"button\" class=\"searches__reset\" href=\"/searches\"><img aria-hidden=\"true\" class=\"colorize--black\" src=\"\(roomAsset("remove.svg"))\" width=\"14\" height=\"14\" /><span class=\"for-screen-reader\">Clear search field</span></a><button name=\"button\" type=\"submit\" class=\"btn btn--reversed flex-item-no-shrink txt-small\" style=\"--btn-border-radius: 0.5em\"><img aria-hidden=\"true\" src=\"\(roomAsset("arrow-up.svg"))\" /><span class=\"for-screen-reader\">Search</span></button></div></form></div>"
         let flash = SessionPipeline.readFlash(request)
-        let layout = try await SidebarLayout.load(request: request, user: session.user, database: database)
-        let body = SidebarRenderer.render(user: session.user, account: layout.account, lastRoomID: layout.lastRoomID, shared: [], directs: [], placeholders: [], canCreateRooms: false, flash: flash, pageTitle: "Search", pageNav: pageNav, pageContent: pageContent, pageFooter: pageFooter, pageBodyClass: "sidebar searches", pageSidebarContent: sidebar)
-        var response = Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: body)))
+        let body = SidebarRenderer.render(user: session.user, account: layout.account, lastRoomID: layout.lastRoomID, shared: [], directs: [], placeholders: [], canCreateRooms: false, flash: flash, pageTitle: "Search", pageNav: pageNav, pageContentWriter: { buffer in
+            buffer.write(pageContentPrefix)
+            for fragment in messageFragments { buffer.write(fragment) }
+            buffer.write("</div></div>")
+        }, pageFooter: pageFooter, pageBodyClass: "sidebar searches", pageSidebarContent: sidebar)
+        var response = Response(status: .ok, body: body.responseBody())
         response.headers[.contentType] = "text/html; charset=utf-8"
         response.headers[HTTPField.Name("cache-control")!] = "max-age=0, private, must-revalidate"
-        response.headers[HTTPField.Name("etag")!] = etag(for: body)
+        response.headers[HTTPField.Name("etag")!] = body.etag()
         SessionPipeline.appendRefreshCookie(session, to: &response)
         if let flashCookie = flash.setCookie { response.headers.append(HTTPField(name: .setCookie, value: flashCookie)) }
         return response
@@ -128,11 +119,4 @@ private func cgiEscape(_ value: String) -> String {
     }.joined()
 }
 
-private func searchCookieInteger(_ name: String, _ header: String?) -> Int64? {
-    guard let header else { return nil }
-    for item in header.split(separator: ";") {
-        let pair = item.split(separator: "=", maxSplits: 1)
-        if pair.count == 2, pair[0].trimmingCharacters(in: .whitespaces) == name { return Int64(pair[1]) }
-    }
-    return nil
-}
+private func searchCookieInteger(_ name: String, _ header: String?) -> Int64? { RequestCookies.integer(name, in: header) }
