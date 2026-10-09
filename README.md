@@ -38,15 +38,13 @@ Hits are answered on the connection's event loop by `CachedReadHandler`, which s
 
 Swift leads the C and Rust ports on every benchmarked route in the shared [once-campfire-verification](https://github.com/pierophp/once-campfire-verification) harness, which validates every response against its route contract and audits every acknowledged write: medians from three alternating runs, 16 clients, four server CPUs, gzip (`--apps rust,swift,c --routes room_show,messages_page,sidebar,search,post_message`; [results](bench/results/verification-event-loop-20261009)):
 
-| Endpoint | Swift | Swift `505baf6` | C `135fc20` | Rust `9872c1d` | Swift vs C |
-|---|---:|---:|---:|---:|---:|
-| Room page | 53,820 | 31,305 | 41,563 | 28,469 | 1.29× |
-| Messages page | 55,291 | 32,456 | 43,709 | 27,366 | 1.26× |
-| Sidebar | 62,474 | 33,737 | 46,667 | 31,547 | 1.34× |
-| Search | 59,880 | 34,034 | 47,953 | 29,677 | 1.25× |
-| Post message | 3,146 | 3,298 | 1,647 | 2,300 | 1.91× |
-
-`505baf6` is the previous revision (response cache, router-served hits), measured in the same harness on the same day; C and Rust are from the run with this revision.
+| Endpoint | Swift | C `135fc20` | Rust `9872c1d` | Swift vs C |
+|---|---:|---:|---:|---:|
+| Room page | 53,820 | 41,563 | 28,469 | 1.29× |
+| Messages page | 55,291 | 43,709 | 27,366 | 1.26× |
+| Sidebar | 62,474 | 46,667 | 31,547 | 1.34× |
+| Search | 59,880 | 47,953 | 29,677 | 1.25× |
+| Post message | 3,146 | 1,647 | 2,300 | 1.91× |
 
 Read latency is also the lowest of the three: median p50 0.20–0.23 ms and p99 0.42–0.49 ms, against C's 0.31–0.36 / 0.68–0.83 ms and Rust's 0.48–0.56 / 1.03–1.11 ms. Posting p99 swings between about 10 and 40 ms from run to run in this and the previous revision alike (WAL checkpoints); its median is about 7% higher than before, now that handlers share the event-loop threads with I/O.
 
