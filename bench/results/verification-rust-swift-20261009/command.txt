@@ -1,0 +1,6 @@
+# once-campfire-verification aa4a7ee, images campfire-rust:app (9872c1d),
+# campfire-swift:response-cache (2f45c55).
+# Raw per-sample loadgen output is not committed, as in the verification repo.
+SWIFT_IMAGE=campfire-swift:response-cache bin/benchmark --apps rust,swift --rounds 3 \
+  --cpus 8-11 --client-cpus 4-7 \
+  --routes room_show,messages_page,sidebar,search,post_message
