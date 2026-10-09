@@ -21,26 +21,32 @@ struct RailsFlash: Sendable { let notice: String?; let alert: String?; let setCo
 
 enum SessionPipeline {
     static func load(_ request: Request, database: SQLiteDatabase) async throws -> RequestSession? {
-        guard let cookieHeader = request.headers[.cookie],
-              let signedCookie = cookieValue("session_token", in: cookieHeader),
-              let token = verifiedSessionToken(signedCookie) else { return nil }
-
-        // Rails performs one session lookup followed by one user lookup on the request path.
-        let rows = try await database.readAsync { connection -> (SQLiteRow, SQLiteRow)? in
-            guard let session = try connection.firstRow("SELECT id, user_id, julianday(last_active_at) <= julianday('now', '-1 hour') FROM sessions WHERE token=? LIMIT 1", bindings: [.text(token)]),
-                  let userID = session.integer(1),
-                  let user = try connection.firstRow("SELECT id, name, role, email_address, updated_at FROM users WHERE id=? AND status=0 LIMIT 1", bindings: [.integer(userID)]) else { return nil }
-            return (session, user)
-        }
-        guard let (session, userRow) = rows, let sessionID = session.integer(0),
-              let id = userRow.integer(0), let name = userRow.string(1) else { return nil }
-        let refreshed = session.integer(2) == 1
-        if refreshed {
+        guard let token = token(request.headers) else { return nil }
+        guard let session = try await database.readAsync({ try find(token: token, connection: $0) }) else { return nil }
+        if session.refreshed {
             try await database.writeAsync { connection, _ in
-                try connection.execute("UPDATE sessions SET last_active_at=strftime('%Y-%m-%d %H:%M:%f','now'), updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?", bindings: [.integer(sessionID)])
+                try connection.execute("UPDATE sessions SET last_active_at=strftime('%Y-%m-%d %H:%M:%f','now'), updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?", bindings: [.integer(session.id)])
             }
         }
-        return RequestSession(id: sessionID, token: token, user: SignedInUser(id: id, name: name, updatedAt: userRow.string(4) ?? "", role: userRow.integer(2) ?? 0, email: userRow.string(3)), refreshed: refreshed)
+        return session
+    }
+
+    /// The verified, unexpired `session_token` cookie's token.
+    static func token(_ headers: HTTPFields) -> String? {
+        guard let cookieHeader = headers[.cookie],
+              let signedCookie = cookieValue("session_token", in: cookieHeader) else { return nil }
+        return verifiedSessionToken(signedCookie)
+    }
+
+    /// The session and its active user. `refreshed` marks a session whose activity the caller
+    /// must record (`load` writes it).
+    static func find(token: String, connection: SQLiteConnection) throws -> RequestSession? {
+        // Rails performs one session lookup followed by one user lookup on the request path.
+        guard let session = try connection.firstRow("SELECT id, user_id, julianday(last_active_at) <= julianday('now', '-1 hour') FROM sessions WHERE token=? LIMIT 1", bindings: [.text(token)]),
+              let sessionID = session.integer(0), let userID = session.integer(1),
+              let user = try connection.firstRow("SELECT id, name, role, email_address, updated_at FROM users WHERE id=? AND status=0 LIMIT 1", bindings: [.integer(userID)]),
+              let id = user.integer(0), let name = user.string(1) else { return nil }
+        return RequestSession(id: sessionID, token: token, user: SignedInUser(id: id, name: name, updatedAt: user.string(4) ?? "", role: user.integer(2) ?? 0, email: user.string(3)), refreshed: session.integer(2) == 1)
     }
 
     static func appendRefreshCookie(_ session: RequestSession, to response: inout Response) {
@@ -53,8 +59,10 @@ enum SessionPipeline {
 
     /// Open the encrypted Rails session only when layout reads flash. An empty session is left
     /// untouched, so an ordinary page read does not emit a Set-Cookie header.
-    static func readFlash(_ request: Request) -> RailsFlash {
-        guard let header = request.headers[.cookie], let raw = cookieValue("_campfire_session", in: header) else {
+    static func readFlash(_ request: Request) -> RailsFlash { readFlash(request.headers) }
+
+    static func readFlash(_ headers: HTTPFields) -> RailsFlash {
+        guard let header = headers[.cookie], let raw = cookieValue("_campfire_session", in: header) else {
             return RailsFlash(notice: nil, alert: nil, setCookie: nil)
         }
         // A session without flash yields no output and no cookie; remember that outcome.
@@ -99,21 +107,38 @@ enum SessionPipeline {
 
     private static func sessionEncryptor() -> MessageEncryptor { AppSecrets.sessionEncryptor }
 
-    private static let verifiedCookies = BoundedCache<String, (value: String, expiresAt: String?)>(limit: 16_384)
+    private struct VerifiedCookie { let value: String; let expiresAt: String?; let expiredFromSecond: Int64? }
+    private static let verifiedCookies = BoundedCache<String, VerifiedCookie>(limit: 16_384)
     private static let flashlessSessions = BoundedSet(limit: 16_384)
 
     /// Signature checks and JSON decoding depend only on the cookie text; expiry depends on now.
     private static func verifiedSessionToken(_ signedCookie: String) -> String? {
-        let cookie: (value: String, expiresAt: String?)
+        let cookie: VerifiedCookie
         if let cached = verifiedCookies.value(for: signedCookie) {
             cookie = cached
         } else {
             guard let verified = AppSecrets.cookieVerifier.verifiedCookie(signedCookie, name: "session_token") else { return nil }
-            verifiedCookies.insert(verified, for: signedCookie)
-            cookie = verified
+            cookie = VerifiedCookie(value: verified.value, expiresAt: verified.expiresAt, expiredFromSecond: verified.expiresAt.flatMap(firstExpiredSecond))
+            verifiedCookies.insert(cookie, for: signedCookie)
         }
-        if let expiry = cookie.expiresAt, UTCTime.iso8601(UTCTime.nowSeconds()) >= expiry { return nil }
+        if let expiry = cookie.expiresAt {
+            let now = UTCTime.nowSeconds()
+            if let boundary = cookie.expiredFromSecond { if now >= boundary { return nil } }
+            else if UTCTime.iso8601(now) >= expiry { return nil }
+        }
         return cookie.value
+    }
+
+    /// The first whole second whose `iso8601` text compares `>=` the expiry text, so the per-request
+    /// check is an integer comparison with the same outcome as comparing the strings. nil when the
+    /// expiry does not parse; the caller then compares the text.
+    private static func firstExpiredSecond(_ expiry: String) -> Int64? {
+        guard let microseconds = UTCTime.parseMicroseconds(expiry) else { return nil }
+        let floor = microseconds >= 0 ? microseconds / 1_000_000 : (microseconds - 999_999) / 1_000_000
+        for candidate in (floor - 1)...(floor + 1) where UTCTime.iso8601(candidate) >= expiry {
+            return UTCTime.iso8601(candidate - 1) < expiry ? candidate : nil
+        }
+        return nil
     }
 
     private struct CookieLookup: Hashable { let name: String; let header: String }

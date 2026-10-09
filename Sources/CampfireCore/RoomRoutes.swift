@@ -179,7 +179,7 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
     }
 
     router.get("/rooms/:id/messages") { request, context async throws -> Response in
-        let round = responseCache.begin(request, endpoint: "messages#index")
+        let round = await responseCache.begin(request, endpoint: CachedRead.messages(0).endpoint)
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
             response.headers[.location] = "/session/new"
@@ -187,11 +187,9 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         }
 
         let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
-        if let cached = responseCache.lookup(round, request: request, session: session, flash: SessionPipeline.readFlash(request)),
+        if let cached = await responseCache.lookup(round, request: request, session: session, flash: SessionPipeline.readFlash(request)),
            try await roomAccessible(database, roomID: roomID, userID: session.user.id) {
-            var response = cached.response(notModified: cached.etag.map { ifNoneMatch(request.headers[HTTPField.Name("if-none-match")!], matches: $0) } ?? false)
-            SessionPipeline.appendRefreshCookie(session, to: &response)
-            return response
+            return CachedRead.messages(roomID).response(cached, requestHeaders: request.headers, session: session)
         }
         let beforeID = request.uri.queryParameters["before"].flatMap { Int64($0) }
         let page = try await database.readAsync { connection -> (String?, [MessageVersion], [MessageFragment]) in
@@ -246,7 +244,7 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
     }
 
     router.get("/rooms/:id") { request, context async throws -> Response in
-        let round = responseCache.begin(request, endpoint: "rooms#show")
+        let round = await responseCache.begin(request, endpoint: CachedRead.room(0).endpoint)
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
             response.headers[.location] = "/session/new"
@@ -254,14 +252,9 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         }
         let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
         let flash = SessionPipeline.readFlash(request)
-        if let cached = responseCache.lookup(round, request: request, session: session, flash: flash),
+        if let cached = await responseCache.lookup(round, request: request, session: session, flash: flash),
            try await roomAccessible(database, roomID: roomID, userID: session.user.id) {
-            var response = cached.response()
-            if let cookie = lastRoomCookie(request: request, roomID: roomID) {
-                response.headers.append(HTTPField(name: .setCookie, value: cookie))
-            }
-            SessionPipeline.appendRefreshCookie(session, to: &response)
-            return response
+            return CachedRead.room(roomID).response(cached, requestHeaders: request.headers, session: session)
         }
         let lastRoomID = SidebarLayout.lastRoomCookie(request)
         let result = try await database.readAsync { connection -> RoomPage? in
@@ -321,7 +314,7 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         response.headers[.contentType] = "text/html; charset=utf-8"
         response.headers[HTTPField.Name("cache-control")!] = "max-age=0, private, must-revalidate"
         response.headers[HTTPField.Name("etag")!] = body.etag()
-        if let cookie = lastRoomCookie(request: request, roomID: returnedID) {
+        if let cookie = lastRoomCookie(request.headers, roomID: returnedID) {
             response.headers.append(HTTPField(name: .setCookie, value: cookie))
         }
         SessionPipeline.appendRefreshCookie(session, to: &response)
@@ -347,14 +340,6 @@ private func roomAccessible(_ database: SQLiteDatabase, roomID: Int64, userID: I
     }
 }
 
-private func ifNoneMatch(_ header: String?, matches validator: String) -> Bool {
-    guard let header else { return false }
-    let target = validator.replacingOccurrences(of: "W/", with: "")
-    return header.split(separator: ",").contains { item in
-        let candidate = item.trimmingCharacters(in: .whitespaces)
-        return candidate == "*" || candidate.replacingOccurrences(of: "W/", with: "") == target
-    }
-}
 
 private enum MessagePushJobQueue {
     private static let queue = DispatchQueue(label: "campfire.message-push-jobs", qos: .utility)
@@ -563,8 +548,3 @@ private func renderComposer(roomID: Int64, origin: String) -> String {
     "<div class=\"composer flex align-end gap position-relative\" data-controller=\"typing-notifications\" data-typing-notifications-active-class=\"typing-indicator--active\"><a class=\"btn flex-item-no-shrink margin-block-end composer__context-btn\" style=\"view-transition-name: input-switcher\" href=\"/searches\"><img aria-hidden=\"true\" src=\"\(roomAsset("search.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Search</span></a><turbo-frame id=\"composer-frame\"><form id=\"composer\" class=\"margin-block flex-item-grow contain\" data-controller=\"composer drop-target\" data-action=\"dragenter-&gt;drop-target#dragenter dragover-&gt;drop-target#dragover drop-&gt;drop-target#drop drop-target:drop@window-&gt;composer#dropFiles lexxy:file-accept-&gt;composer#preventAttachment refresh-room:online@window-&gt;composer#online typing-notifications#stop paste-&gt;composer#pasteFiles turbo:submit-end-&gt;composer#submitEnd refresh-room:offline@window-&gt;composer#offline\" data-composer-messages-outlet=\"#message-area\" data-composer-toolbar-class=\"composer--rich-text\" data-composer-room-id-value=\"\(roomID)\" action=\"/rooms/\(roomID)/messages\" accept-charset=\"UTF-8\" method=\"post\"><fieldset data-composer-target=\"fields\" contents><div class=\"flex flex-column\"><div class=\"composer__filelist flex flex--align-center gap flex-wrap\" data-composer-target=\"fileList\"></div><div class=\"flex composer__input input input--actor fill-white min-width\" style=\"--input-border-radius: 1.3rem\"><div class=\"flex align-end gap full-width\"><img aria-hidden=\"true\" class=\"composer__input-hint colorize--black\" style=\"view-transition-name: input-btn;\" src=\"\(roomAsset("messages-outlined.svg"))\" width=\"22\" height=\"22\"><div class=\"flex flex-column flex-item-grow min-width gap\"><lexxy-editor rows=\"1\" class=\"input lexxy-content\" style=\"order: -1\" aria-multiline=\"true\" aria-label=\"Write a message\" permitted-attachment-types=\"application/vnd.campfire.mention application/vnd.actiontext.opengraph-embed\" data-controller=\"unfurl\" data-action=\"lexxy:change-&gt;typing-notifications#start keydown-&gt;composer#submitByKeyboard:capture lexxy:change-&gt;composer#saveDraft lexxy:insert-link-&gt;unfurl#unfurl\" data-composer-target=\"text\" data-direct-upload-url=\"\(origin)/rails/active_storage/direct_uploads\" data-blob-url-template=\"\(origin)/rails/active_storage/blobs/redirect/:signed_id/:filename\" id=\"message_body\" input=\"message_body_trix_input_message\" name=\"message[body]\"><lexxy-prompt trigger=\"@\" name=\"mention\" src=\"/autocompletable/users?room_id=\(roomID)\" remote-filtering=\"true\" empty-results=\"No matches\"></lexxy-prompt></lexxy-editor></div><label class=\"btn btn--borderless txt-small flex-item-no-shrink composer__attachment-btn input--file\"><img class=\"colorize--black\" aria-hidden=\"true\" src=\"\(roomAsset("attachment.svg"))\" width=\"22\" height=\"22\"><input type=\"file\" data-action=\"composer#filePicked\" multiple><span class=\"for-screen-reader\">Attach a file</span></label><button class=\"btn btn--borderless txt-small flex-item-no-shrink composer__rich-text-btn\" type=\"button\" data-action=\"composer#toggleToolbar\"><img class=\"colorize--black\" aria-hidden=\"true\" src=\"\(roomAsset("text-options.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Rich text</span></button><button name=\"send\" type=\"submit\" data-action=\"composer#submit\" class=\"btn btn--reversed flex-item-no-shrink txt-small\"><img aria-hidden=\"true\" src=\"\(roomAsset("arrow-up.svg"))\" width=\"20\" height=\"20\"><span class=\"for-screen-reader\">Send Message</span></button></div></div></div></fieldset><div class=\"typing-indicator gap txt-small align-center flex-inline\" data-typing-notifications-target=\"indicator\"><div class=\"typing-indicator__author spinner\" data-typing-notifications-target=\"author\"></div></div><input data-composer-target=\"clientid\" type=\"hidden\" name=\"message[client_message_id]\" id=\"message_client_message_id\"></form></turbo-frame></div>"
 }
 
-private func lastRoomCookie(request: Request, roomID: Int64) -> String? {
-    let current = RequestCookies.trimmedItemValue("last_room", in: request.headers[.cookie])
-    guard current != String(roomID) else { return nil }
-    return "last_room=\(roomID); path=/; expires=\(UTCTime.httpDate(UTCTime.twentyYearsFromNow())); samesite=lax"
-}

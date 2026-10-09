@@ -18,17 +18,15 @@ private struct SearchResultMessage: Sendable {
 
 func installSearchRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, fragmentCache: MessageFragmentCache, responseCache: ResponseCache) {
     router.get("/searches") { request, _ async throws -> Response in
-        let round = responseCache.begin(request, endpoint: "searches#index")
+        let round = await responseCache.begin(request, endpoint: CachedRead.search.endpoint)
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
             response.headers[.location] = "/session/new"
             return response
         }
         let flash = SessionPipeline.readFlash(request)
-        if let cached = responseCache.lookup(round, request: request, session: session, flash: flash) {
-            var response = cached.response()
-            SessionPipeline.appendRefreshCookie(session, to: &response)
-            return response
+        if let cached = await responseCache.lookup(round, request: request, session: session, flash: flash) {
+            return CachedRead.search.response(cached, requestHeaders: request.headers, session: session)
         }
 
         let rawQuery = request.uri.queryParameters["q"].map(String.init)

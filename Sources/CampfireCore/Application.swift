@@ -11,11 +11,15 @@ public func makeApplication(
 ) throws -> Application<RouterResponder<BasicRequestContext>> {
     let database = try suppliedDatabase ?? SQLiteDatabase(path: databasePath)
     let responseCacheMB = Int(ProcessInfo.processInfo.environment["CAMPFIRE_RESPONSE_CACHE_MB"] ?? "64") ?? 64
-    let router = makeRouter(database: database, responseCache: ResponseCache(database: database, maxBytes: max(0, responseCacheMB) << 20), avatarFilesPath: avatarFilesPath)
+    let responseCache = ResponseCache(database: database, maxBytes: max(0, responseCacheMB) << 20)
+    let router = makeRouter(database: database, responseCache: responseCache, avatarFilesPath: avatarFilesPath)
     let group = eventLoopGroupProvider ?? .shared(EventLoopSizing.makeGroup())
+    let serverName = "campfire-swift"
     return Application(
         router: router,
-        configuration: .init(address: .hostname("0.0.0.0", port: port), serverName: "campfire-swift"),
+        // Cached reads are answered on the event loop before the router; see CachedReadHandler.
+        server: .http1(configuration: .init(additionalChannelHandlers: [CachedReadHandler(cache: responseCache, serverName: serverName)])),
+        configuration: .init(address: .hostname("0.0.0.0", port: port), serverName: serverName),
         eventLoopGroupProvider: group
     )
 }

@@ -115,6 +115,8 @@ public final class SQLiteConnection: @unchecked Sendable {
     private var statements: [String: OpaquePointer] = [:]
     private var statementOrder: [String] = []
     private let lock = NSRecursiveLock()
+    /// This connection's last `PRAGMA data_version`; only read and written by its user.
+    fileprivate var observedDataVersion: Int64?
 
     fileprivate init(path: String, queryOnly: Bool) throws {
         var database: OpaquePointer?
@@ -275,6 +277,8 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private let checkpointerWorker: SQLiteWorker
     private let wal = WALMonitor()
     private let databasePath: String
+    private let generationLock = NSLock()
+    private var generationValue: UInt64 = 0
 
     public init(path: String, readerCount: Int = Int(ProcessInfo.processInfo.environment["RAILS_MAX_THREADS"] ?? "8") ?? 8, writeQueueCapacity: Int = 256) throws {
         guard FileManager.default.fileExists(atPath: path) else { throw SQLiteError.databaseNotFound(path) }
@@ -302,10 +306,22 @@ public final class SQLiteDatabase: @unchecked Sendable {
     public static var version: String { String(cString: sqlite3_libversion()) }
     public static var hasFTS5: Bool { sqlite3_compileoption_used("ENABLE_FTS5") != 0 }
 
-    /// A separate query-only connection whose `PRAGMA data_version` reveals every other
-    /// connection's commits. The caller serializes its use.
-    func openObserver() throws -> SQLiteConnection {
-        try SQLiteConnection(path: databasePath, queryOnly: true)
+    /// The database generation, as the C port keeps its data version: the writer advances it after
+    /// every write, and a reader that sees `PRAGMA data_version` change since its own previous
+    /// look (a commit by any other connection, including another process) advances it too. Each
+    /// connection observes its own version, so no lock is held while SQLite runs. nil when the
+    /// pragma fails. Call while holding `connection` (inside a read).
+    func observedGeneration(_ connection: SQLiteConnection) -> UInt64? {
+        guard let current = try? connection.scalarInt("PRAGMA data_version") else { return nil }
+        let changed = connection.observedDataVersion.map { $0 != current } ?? false
+        connection.observedDataVersion = current
+        generationLock.lock(); defer { generationLock.unlock() }
+        if changed { generationValue &+= 1 }
+        return generationValue
+    }
+
+    private func advanceGeneration() {
+        generationLock.lock(); generationValue &+= 1; generationLock.unlock()
     }
 
     /// Runs synchronously on one of the fixed reader connections. Call from a worker, not an event loop.
@@ -329,7 +345,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
     }
 
     /// Runs `body` on the calling thread when a reader connection is free; nil when none is.
-    private func readOnFreeConnection<T>(_ body: (SQLiteConnection) throws -> T) -> Result<T, Error>? {
+    func readOnFreeConnection<T>(_ body: (SQLiteConnection) throws -> T) -> Result<T, Error>? {
         for index in readers.indices where readerLocks[index].try() {
             defer { readerLocks[index].unlock() }
             return Result { try body(readers[index]) }
@@ -372,6 +388,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             do { try hook(writer) }
             catch { afterCommitError = afterCommitError ?? error }
         }
+        advanceGeneration()
         manageWAL()
         if let afterCommitError { throw afterCommitError }
         return value

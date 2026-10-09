@@ -11,6 +11,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
+        .package(url: "https://github.com/apple/swift-nio-extras.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/scinfu/SwiftSoup.git", from: "2.7.0"),
     ],
@@ -35,6 +36,7 @@ let package = Package(
                 "CZlib",
                 .product(name: "Hummingbird", package: "hummingbird"),
                 .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTPTypes", package: "swift-nio-extras"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "SwiftSoup", package: "SwiftSoup"),
             ],
@@ -42,7 +44,12 @@ let package = Package(
         ),
         .executableTarget(
             name: "Campfire",
-            dependencies: ["CampfireCore", .product(name: "Hummingbird", package: "hummingbird")]
+            dependencies: [
+                "CampfireCore",
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
         ),
         .testTarget(
             name: "CampfireTests",
@@ -51,6 +58,8 @@ let package = Package(
                 "CSQLite",
                 "CZlib",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+                .product(name: "NIOHTTPTypes", package: "swift-nio-extras"),
             ],
             resources: [.copy("Fixtures")]
         ),

@@ -306,23 +306,36 @@ registradas; o resumo do passo 6 é para a comparação nova de duas imagens.
 
 ### Referência de performance desta máquina
 
-Intel Core i7-1255U, três repetições, 16 clientes, quatro threads de hardware para
-cada servidor. Medianas em req/s:
+Intel Core i7-1255U, harness `once-campfire-verification` (respostas validadas contra o
+contrato de cada rota e escritas auditadas), três rodadas alternadas, 16 clientes, CPUs
+`8-11` para o servidor e `4-7` para o cliente, gzip. Medianas em req/s:
 
-| Endpoint | Swift original | Swift `32f31f8` | Swift atual | Rust |
-|---|---:|---:|---:|---:|
-| Sala | 111,7 | 1.465,3 | 16.720,1 | 14.574,8 |
-| Mensagens | 94,0 | 2.926,3 | 19.259,4 | 16.718,3 |
-| Sidebar | 44,7 | 3.797,6 | 15.531,9 | 13.366,5 |
-| Busca | 323,6 | 4.356,6 | 15.780,9 | 13.612,7 |
-| Postagem | 116,6 | 288,6 | 3.196,8 | 3.049,8 |
+| Endpoint | Swift original | Swift `32f31f8` | Swift `4d808fd` | Swift `505baf6` | Swift atual | C `135fc20` | Rust `9872c1d` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Sala | 111,7 | 1.465,3 | 16.720,1 | 31.304,9 | 53.820,2 | 41.563,3 | 28.469,0 |
+| Mensagens | 94,0 | 2.926,3 | 19.259,4 | 32.455,5 | 55.291,1 | 43.709,0 | 27.366,4 |
+| Sidebar | 44,7 | 3.797,6 | 15.531,9 | 33.737,1 | 62.474,0 | 46.667,4 | 31.547,3 |
+| Busca | 323,6 | 4.356,6 | 15.780,9 | 34.034,1 | 59.879,8 | 47.953,0 | 29.677,1 |
+| Postagem | 116,6 | 288,6 | 3.196,8 | 3.297,7 | 3.146,0 | 1.647,0 | 2.300,3 |
 
-Latência p99 mediana (ms), Swift atual / Rust: sala 2,48 / 1,90; mensagens
-2,37 / 1,56; sidebar 2,81 / 2,13; busca 3,17 / 2,19; postagem 29,50 / 10,94.
-Swift tem p50 menor em todos os endpoints, mas cauda maior; na postagem a cauda
-vem dos checkpoints RESTART do WAL em disco. Pico de memória: Swift 171–176 MiB,
-Rust 143–145 MiB. Resultados em `benchmark-results/20261006-115136`.
+As três primeiras colunas vêm do runner local antigo (`bench/results/key-cache-20261006`
+e `wal-pages-20261006`), com o seed do Rust; as demais, do harness de verificação, com
+o seed dele. "Swift atual" é a revisão com execução nos event loops e hits do cache
+respondidos no pipeline do NIO; resultados em
+`bench/results/verification-event-loop-20261009`.
 
-São referências locais, não limites de aprovação para outras máquinas. "Swift
-atual" são as alterações locais sobre `32f31f8` (ainda não commitadas); Rust foi
-medido em `ccece30`. Atualizações dos checkouts podem alterar estes números.
+Latência mediana nas leituras, Swift atual / C / Rust: p50 0,20–0,23 / 0,31–0,36 /
+0,48–0,56 ms; p99 0,42–0,49 / 0,68–0,83 / 1,03–1,11 ms. Na postagem o p99 do Swift
+oscila entre ~10 e ~40 ms de uma rodada para outra (checkpoints do WAL).
+
+Para reproduzir, com as imagens construídas e o loadgen do harness compilado:
+
+```bash
+cd "$CAMPFIRE_ROOT/once-campfire-verification"
+SWIFT_IMAGE=campfire-swift:app bin/benchmark --apps rust,swift,c --rounds 3 \
+  --cpus 8-11 --client-cpus 4-7 \
+  --routes room_show,messages_page,sidebar,search,post_message
+```
+
+O Swift ainda não serve os assets CSS nem a página `/up` do Rails, por isso a seleção de
+rotas. São referências locais, não limites de aprovação para outras máquinas.

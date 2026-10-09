@@ -31,17 +31,15 @@ struct SidebarData: Sendable {
 
 func installSidebarRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, responseCache: ResponseCache) {
     router.get("/users/me/sidebar") { request, _ async throws -> Response in
-        let round = responseCache.begin(request, endpoint: "users/sidebars#show")
+        let round = await responseCache.begin(request, endpoint: CachedRead.sidebar.endpoint)
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
             response.headers[.location] = "/session/new"
             return response
         }
         let flash = SessionPipeline.readFlash(request)
-        if let cached = responseCache.lookup(round, request: request, session: session, flash: flash) {
-            var response = cached.response(notModified: cached.etag != nil && request.headers[HTTPField.Name("if-none-match")!] == cached.etag)
-            SessionPipeline.appendRefreshCookie(session, to: &response)
-            return response
+        if let cached = await responseCache.lookup(round, request: request, session: session, flash: flash) {
+            return CachedRead.sidebar.response(cached, requestHeaders: request.headers, session: session)
         }
 
         let lastRoomCookie = SidebarLayout.lastRoomCookie(request)
