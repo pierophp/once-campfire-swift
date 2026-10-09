@@ -7,7 +7,7 @@ import XCTest
 @testable import CampfireCore
 
 final class SearchTests: XCTestCase {
-    func testCoffeeSearchShowsReachableMessagesInChronologicalOrderAndRecentSearches() async throws {
+    func testCoffeeSearchShowsReachableMessagesInIDOrderAndRecentSearches() async throws {
         try await withSeed { databasePath, _ in
             let app = try makeApplication(databasePath: databasePath)
             try await app.test(.router) { client in
@@ -18,7 +18,9 @@ final class SearchTests: XCTestCase {
                 XCTAssertEqual(response.status.code, 200)
                 let html = String(buffer: response.body)
                 let ids = html.matches(for: #"data-message-id="(\d+)""#).compactMap(Int64.init)
-                XCTAssertEqual(ids, [933434510, 933434520, 933434530, 933434540, 933434550, 933434560, 933434570, 933434580, 933434590, 933434600, 933434610, 933434620, 933434483])
+                // The newest 100 matches by message id, oldest first, as the Rust port and the shared
+                // verification contract read them off the full-text index.
+                XCTAssertEqual(ids, [933434483, 933434510, 933434520, 933434530, 933434540, 933434550, 933434560, 933434570, 933434580, 933434590, 933434600, 933434610, 933434620])
                 XCTAssertTrue(html.contains("Coffee first, then the launch plan."))
                 XCTAssertTrue(html.contains("searches__query"))
                 XCTAssertTrue(html.contains("“cuckoo”"))

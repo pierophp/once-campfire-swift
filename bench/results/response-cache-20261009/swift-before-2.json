@@ -1,0 +1,128 @@
+{
+ "app": "swift-before",
+ "rep": 2,
+ "cold_start_ms": 164,
+ "memory": {
+  "idle_current_mb": 5,
+  "idle_anon_mb": 4,
+  "peak_current_mb": 181,
+  "peak_anon_mb": 131,
+  "cgroup_peak_mb": 182
+ },
+ "http": [
+  {
+   "avg_bytes": 19253,
+   "conc": 16,
+   "errors": 0,
+   "gzip": true,
+   "latency": {
+    "max_ms": 5.563,
+    "mean_ms": 0.94,
+    "n": 135290,
+    "p50_ms": 0.895,
+    "p90_ms": 1.395,
+    "p99_ms": 2.145
+   },
+   "ok": 135290,
+   "path": "/rooms/486777696",
+   "rps": 16908.9,
+   "secs": 8.0,
+   "statuses": {
+    "200": 135290
+   },
+   "route": "room_show"
+  },
+  {
+   "avg_bytes": 11019,
+   "conc": 16,
+   "errors": 0,
+   "gzip": true,
+   "latency": {
+    "max_ms": 5.763,
+    "mean_ms": 0.79,
+    "n": 161745,
+    "p50_ms": 0.66,
+    "p90_ms": 1.39,
+    "p99_ms": 2.483
+   },
+   "ok": 161745,
+   "path": "/rooms/486777696/messages?before=933434569",
+   "rps": 20216.2,
+   "secs": 8.0,
+   "statuses": {
+    "200": 161745
+   },
+   "route": "messages_page"
+  },
+  {
+   "avg_bytes": 5561,
+   "conc": 16,
+   "errors": 0,
+   "gzip": true,
+   "latency": {
+    "max_ms": 7.007,
+    "mean_ms": 0.99,
+    "n": 129472,
+    "p50_ms": 0.822,
+    "p90_ms": 1.769,
+    "p99_ms": 3.119
+   },
+   "ok": 129472,
+   "path": "/users/me/sidebar",
+   "rps": 16182.5,
+   "secs": 8.0,
+   "statuses": {
+    "200": 129472
+   },
+   "route": "sidebar"
+  },
+  {
+   "avg_bytes": 8826,
+   "conc": 16,
+   "errors": 0,
+   "gzip": true,
+   "latency": {
+    "max_ms": 7.091,
+    "mean_ms": 1.02,
+    "n": 125683,
+    "p50_ms": 0.85,
+    "p90_ms": 1.814,
+    "p99_ms": 3.143
+   },
+   "ok": 125683,
+   "path": "/searches?q=coffee",
+   "rps": 15708.3,
+   "secs": 8.0,
+   "statuses": {
+    "200": 125683
+   },
+   "route": "search"
+  },
+  {
+   "avg_bytes": 1863,
+   "conc": 16,
+   "errors": 0,
+   "gzip": true,
+   "latency": {
+    "max_ms": 62.303,
+    "mean_ms": 5.52,
+    "n": 23207,
+    "p50_ms": 4.339,
+    "p90_ms": 7.795,
+    "p99_ms": 29.087
+   },
+   "ok": 23207,
+   "path": "POST /rooms/201306877/messages",
+   "rps": 2896.1,
+   "secs": 8.01,
+   "statuses": {
+    "200": 23207
+   },
+   "route": "post_message"
+  }
+ ],
+ "cable": [],
+ "upload": {},
+ "loadavg_start": "6.33 4.81 3.25 1/1512 1989123",
+ "loadavg_end": "6.23 4.99 3.40 2/1547 1992127"
+}

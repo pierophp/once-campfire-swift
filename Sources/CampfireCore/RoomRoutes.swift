@@ -89,7 +89,7 @@ final class MessageFragmentCache: @unchecked Sendable {
     }
 }
 
-func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, fragmentCache: MessageFragmentCache) {
+func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, fragmentCache: MessageFragmentCache, responseCache: ResponseCache) {
     router.post("/rooms/:id/messages") { request, context async throws -> Response in
         let remoteAddress = request.headers[HTTPField.Name("x-forwarded-for")!]?.split(separator: ",").first.map(String.init) ?? "127.0.0.1"
         let banned = try await database.readAsync { connection in
@@ -179,6 +179,7 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
     }
 
     router.get("/rooms/:id/messages") { request, context async throws -> Response in
+        let round = responseCache.begin(request, endpoint: "messages#index")
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
             response.headers[.location] = "/session/new"
@@ -186,6 +187,12 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
         }
 
         let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
+        if let cached = responseCache.lookup(round, request: request, session: session, flash: SessionPipeline.readFlash(request)),
+           try await roomAccessible(database, roomID: roomID, userID: session.user.id) {
+            var response = cached.response(notModified: cached.etag.map { ifNoneMatch(request.headers[HTTPField.Name("if-none-match")!], matches: $0) } ?? false)
+            SessionPipeline.appendRefreshCookie(session, to: &response)
+            return response
+        }
         let beforeID = request.uri.queryParameters["before"].flatMap { Int64($0) }
         let page = try await database.readAsync { connection -> (String?, [MessageVersion], [MessageFragment]) in
             let room = try connection.firstRow("SELECT r.name FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)])
@@ -239,12 +246,23 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
     }
 
     router.get("/rooms/:id") { request, context async throws -> Response in
+        let round = responseCache.begin(request, endpoint: "rooms#show")
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
             response.headers[.location] = "/session/new"
             return response
         }
         let roomID = Int64(context.parameters.get("id") ?? "") ?? 0
+        let flash = SessionPipeline.readFlash(request)
+        if let cached = responseCache.lookup(round, request: request, session: session, flash: flash),
+           try await roomAccessible(database, roomID: roomID, userID: session.user.id) {
+            var response = cached.response()
+            if let cookie = lastRoomCookie(request: request, roomID: roomID) {
+                response.headers.append(HTTPField(name: .setCookie, value: cookie))
+            }
+            SessionPipeline.appendRefreshCookie(session, to: &response)
+            return response
+        }
         let lastRoomID = SidebarLayout.lastRoomCookie(request)
         let result = try await database.readAsync { connection -> RoomPage? in
             guard let room = try connection.firstRow("SELECT r.id, r.name, r.type, r.updated_at, r.creator_id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(session.user.id)]),
@@ -276,7 +294,6 @@ func installRoomRoutes(on router: Router<BasicRequestContext>, database: SQLiteD
 
         let room = result.room
         let returnedID = result.id
-        let flash = SessionPipeline.readFlash(request)
         let joinCode = result.joinCode
         let welcomeHTML = joinCode.map { joinCode in "<div id=\"system_welcome\" class=\"message message--formatted txt-align-center center\"><div class=\"message__body center\"><div class=\"message__body-content position-relative\"><p><strong>Welcome to Campfire</strong><br>To invite people to chat, share the join link below.</p><a href=\"/join/\(erbEscape(joinCode))\">\(erbEscape(joinCode))</a></div></div></div>" }
 
@@ -321,6 +338,13 @@ private struct RoomPage: Sendable {
     /// Present when the welcome banner shows: the original room with no older messages.
     let joinCode: String?
     let directNames: [String]
+}
+
+/// The membership check a room action runs before serving a cached page.
+private func roomAccessible(_ database: SQLiteDatabase, roomID: Int64, userID: Int64) async throws -> Bool {
+    try await database.readAsync { connection in
+        try connection.firstRow("SELECT r.id FROM rooms r INNER JOIN memberships m ON m.room_id=r.id WHERE r.id=? AND m.user_id=? LIMIT 1", bindings: [.integer(roomID), .integer(userID)]) != nil
+    }
 }
 
 private func ifNoneMatch(_ header: String?, matches validator: String) -> Bool {

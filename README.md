@@ -28,19 +28,25 @@ The image listens on plain HTTP at `HTTP_PORT` (default `80`), opens `/rails/sto
 
 The HTTP middleware negotiates `gzip` and `identity` using Rack::Deflater-compatible quality ordering, adds `Vary: Accept-Encoding`, and returns 406 when neither supported encoding is acceptable. It skips bodyless statuses, empty bodies, `Cache-Control: no-transform`, and already encoded responses. Gzip uses the system zlib implementation at level 6. Compressed bodies are cached within a 32 MiB byte budget (a single entry larger than 8 MiB is not cached), with CLOCK eviction. A page rendered from cached message fragments declares its identity to the middleware, so a cache hit never reads or joins the plain body; any other body is found by CRC-32 and length and confirmed by comparing its bytes. The `swift-identity` benchmark sends `Accept-Encoding: identity` to exercise the uncompressed response path.
 
+## Response cache
+
+As in the Rust and C ports, authenticated room, messages, sidebar and search responses keep their completed identity or gzip representation for up to 15 seconds in a bounded 64 MiB store (`CAMPFIRE_RESPONSE_CACHE_MB`; `0` disables it). A dedicated read-only SQLite connection watches `PRAGMA data_version`, so any commit — including another process's writes — moves the cache to a new generation. The generation is captured before authentication and checked again at lookup and admission, so a commit during authentication or rendering cannot store an old page under the new generation. Session authentication and room membership still run on every request. Requests with flash, `Cache-Control: no-cache`/`no-store`, `Pragma: no-cache`, `Range` or `Upgrade` bypass the store. The key covers the user, session, URL, host and every request header except validators and tracing headers. Set-Cookie headers are never stored: a hit adds its own `last_room` and session refresh cookies, and answers `If-None-Match` as the handler would.
+
 ## Performance
 
-Swift now outperforms the Rust port in throughput on every benchmarked endpoint: medians from three runs, 16 clients, four server CPUs, gzip ([raw results](bench/results/wal-pages-20261006)):
+Swift outperforms the Rust port in throughput on every benchmarked endpoint: medians from three runs, 16 clients, four server CPUs, gzip, Rust at `9872c1d` with its response cache ([raw results](bench/results/response-cache-20261009)):
 
-| Endpoint | Swift | Rust `ccece30` | Swift vs Rust |
-|---|---:|---:|---:|
-| Room page | 16,720 | 14,575 | +15% (1.15×) |
-| Messages page | 19,259 | 16,718 | +15% (1.15×) |
-| Sidebar | 15,532 | 13,366 | +16% (1.16×) |
-| Search | 15,781 | 13,613 | +16% (1.16×) |
-| Post message | 3,197 | 3,050 | +5% (1.05×) |
+| Endpoint | Swift before response cache | Swift | Rust `9872c1d` | Swift vs Rust |
+|---|---:|---:|---:|---:|
+| Room page | 16,909 | 33,176 | 30,277 | +10% (1.10×) |
+| Messages page | 20,622 | 33,756 | 28,559 | +18% (1.18×) |
+| Sidebar | 16,106 | 36,392 | 32,847 | +11% (1.11×) |
+| Search | 15,732 | 35,950 | 32,151 | +12% (1.12×) |
+| Post message | 3,420 | 3,394 | 2,287 | +48% (1.48×) |
 
-Swift has the lower median latency everywhere but a higher p99 (2.4–3.2 ms against 1.6–2.2 ms on reads; 29.5 ms against 10.9 ms on posts, from WAL checkpoints on disk), and peaks at ~175 MiB against Rust's ~145 MiB. Read responses, including ETags, are byte-identical to the previous revision.
+Median p99 latency, Swift / Rust: room 1.00 / 1.01 ms, messages 1.15 / 1.06, sidebar 1.12 / 0.99, search 1.16 / 1.02, post 9.70 / 12.94. Peak memory is 178–183 MiB against Rust's 140–177 MiB, unchanged from before the response cache.
+
+The shared [once-campfire-verification](https://github.com/pierophp/once-campfire-verification/tree/swift-implementation) harness, which validates every response against its route contract and audits every acknowledged write, gives the same picture (`--apps rust,swift --routes room_show,messages_page,sidebar,search,post_message`): Swift / Rust medians of 32,685 / 29,375 (room), 33,042 / 28,134 (messages), 35,413 / 31,311 (sidebar), 35,221 / 31,146 (search) and 3,308 / 2,331 (post) req/s. Search returns the newest 100 matches by message id, as that contract and the Rust port do. The Swift port does not serve stylesheet assets or the Rails `/up` page, so it is measured on these routes only.
 
 What the profiles (`perf` inside the container) led to:
 
@@ -50,6 +56,7 @@ What the profiles (`perf` inside the container) led to:
 - **Pages from parts.** `RenderBuffer` writes into `ByteBuffer`s and keeps cached message fragments by reference. A `RenderedPage` hashes its text and its fragments' ids (a tenth of a room page's bytes) into an identity that memoizes the ETag — still SHA-256 of the whole body, as `Rack::ETag` computes it — and keys the gzip cache. The body is joined only when sent uncompressed or first compressed.
 - **Per-request Foundation work.** The secret and signers are created once, and signed avatar IDs and Turbo stream names are memoized. UTC dates are formatted and parsed arithmetically instead of through `DateFormatter`, `Calendar` and `ISO8601DateFormatter`. Cookie parsing, encoding negotiation and verified session cookies (expiry is still checked on every request) are memoized per header value, as is an empty flash. Action Text's regular expressions are compiled once.
 - **Queries.** Message pages fetch the 40 newest and reverse them in Swift, as Rails' `last_page` does, and compute `data-message-timestamp` in Swift for Rails' timestamp shape (other shapes still use SQLite's expression). The sidebar computes room epochs in its main query instead of one query per room.
+- **Response cache.** Repeated authenticated reads return the stored final (gzip) response after authentication and membership checks; see [Response cache](#response-cache). This is the Rust port's `d09811c` and doubles read throughput.
 - **Caches.** The fragment cache keys messages by id and version and evicts with CLOCK instead of scanning for the least recently used entry on every insert.
 
 Differential tests check the arithmetic date parser and formatters against Foundation on tens of thousands of random values, and the timestamp computation against SQLite. The parser reproduces the formatter's floating-point path, which differs from integer arithmetic by 1µs far from 1970.

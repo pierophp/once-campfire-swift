@@ -1,0 +1,91 @@
+date: 2026-10-09T08:00:07-03:00
+host: 7.2.5-3-omarchy, 12th Gen Intel(R) Core(TM) i7-1255U, 12 threads, 23GB
+server cpus: 8-11 (nproc 4); loadgen cpus: 4-7; network: host
+env: WEB_CONCURRENCY=3 JOB_CONCURRENCY=3 RAILS_MAX_THREADS=5 
+rust extra env: 
+user agent: (none)
+swift-before image: campfire-swift:before-response-cache sha256:f1cce1d275b677b50cc05fa59ce76a0ab14cb83d56770257f9c03cc6bcf2da3a 2026-10-06T11:51:20.315577966-03:00
+swift-after image: campfire-swift:response-cache sha256:a79cd41caa5354e7021eccba0e0aedf4533b1c882a3ac18618926f308a0211bf 2026-10-09T07:59:21.192946064-03:00
+rust image: campfire-rust:app sha256:7d9d4f933bd6cdf7a640b23c84f1b11941a676289309d499de3d95c7d255adcc 2026-10-08T22:20:13.531440251-03:00
+rust HEAD: 9872c1d (dirty: 0 files)
+[08:00:07] load before run: 1.82 3.01 2.25 (waited 0s)
+[08:00:07] swift-before rep 1: starting (load: 1.82 3.01 2.25)
+[08:00:17] swift-before rep 1: cold start 165ms, idle 5MB (anon 4MB)
+[08:00:27] swift-before rep 1: room_show c=16 16855.9 rps p50 0.902 p99 2.061 {'200': 134868} err 0
+[08:00:37] swift-before rep 1: messages_page c=16 20897.3 rps p50 0.709 p99 1.859 {'200': 167196} err 0
+[08:00:47] swift-before rep 1: sidebar c=16 16082.5 rps p50 0.963 p99 1.985 {'200': 128680} err 0
+[08:00:57] swift-before rep 1: search c=16 15899.4 rps p50 0.958 p99 2.195 {'200': 127215} err 0
+[08:01:07] swift-before rep 1: post_message c=16 3851.2 rps p50 3.765 p99 9.015 {'200': 30819} err 0
+[08:01:08] swift-before rep 1: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/swift-before-1.json
+[08:01:08] load before run: 5.19 3.67 2.52 (waited 0s)
+[08:01:08] swift-after rep 1: starting (load: 5.19 3.67 2.52)
+[08:01:18] swift-after rep 1: cold start 179ms, idle 6MB (anon 4MB)
+[08:01:29] swift-after rep 1: room_show c=16 33175.9 rps p50 0.457 p99 1.002 {'200': 265424} err 0
+[08:01:39] swift-after rep 1: messages_page c=16 34167.8 rps p50 0.434 p99 1.094 {'200': 273363} err 0
+[08:01:49] swift-after rep 1: sidebar c=16 37158.3 rps p50 0.39 p99 1.103 {'200': 297296} err 0
+[08:01:59] swift-after rep 1: search c=16 36777.6 rps p50 0.394 p99 1.119 {'200': 294242} err 0
+[08:02:09] swift-after rep 1: post_message c=16 3394.3 rps p50 4.139 p99 12.199 {'200': 27172} err 0
+[08:02:10] swift-after rep 1: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/swift-after-1.json
+[08:02:10] load before run: 6.94 4.38 2.83 (waited 0s)
+[08:02:10] rust rep 1: starting (load: 6.94 4.38 2.83)
+[08:02:20] rust rep 1: cold start 449ms, idle 52MB (anon 13MB)
+[08:02:31] rust rep 1: room_show c=16 30430.7 rps p50 0.505 p99 1.012 {'200': 243465} err 0
+[08:02:41] rust rep 1: messages_page c=16 28558.9 rps p50 0.539 p99 1.064 {'200': 228490} err 0
+[08:02:51] rust rep 1: sidebar c=16 32979.5 rps p50 0.456 p99 0.989 {'200': 263854} err 0
+[08:03:01] rust rep 1: search c=16 32151.1 rps p50 0.468 p99 1.018 {'200': 257229} err 0
+[08:03:11] rust rep 1: post_message c=16 2286.7 rps p50 6.603 p99 12.935 {'200': 18318} err 0
+[08:03:12] rust rep 1: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/rust-1.json
+[08:03:12] load before run: 4.91 4.27 2.89 (waited 0s)
+[08:03:12] rust rep 2: starting (load: 4.91 4.27 2.89)
+[08:03:22] rust rep 2: cold start 189ms, idle 15MB (anon 13MB)
+[08:03:32] rust rep 2: room_show c=16 30277.2 rps p50 0.507 p99 1.014 {'200': 242238} err 0
+[08:03:42] rust rep 2: messages_page c=16 28633.6 rps p50 0.537 p99 1.066 {'200': 229085} err 0
+[08:03:52] rust rep 2: sidebar c=16 32847.4 rps p50 0.459 p99 0.993 {'200': 262798} err 0
+[08:04:02] rust rep 2: search c=16 32162.3 rps p50 0.468 p99 1.015 {'200': 257317} err 0
+[08:04:12] rust rep 2: post_message c=16 2317.7 rps p50 6.523 p99 12.711 {'200': 18563} err 0
+[08:04:13] rust rep 2: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/rust-2.json
+[08:04:13] load before run: 4.90 4.32 3.00 (waited 0s)
+[08:04:13] swift-after rep 2: starting (load: 4.90 4.32 3.00)
+[08:04:23] swift-after rep 2: cold start 163ms, idle 5MB (anon 4MB)
+[08:04:34] swift-after rep 2: room_show c=16 33016.6 rps p50 0.457 p99 1.035 {'200': 264151} err 0
+[08:04:44] swift-after rep 2: messages_page c=16 33374.0 rps p50 0.441 p99 1.148 {'200': 267017} err 0
+[08:04:54] swift-after rep 2: sidebar c=16 36043.6 rps p50 0.402 p99 1.125 {'200': 288374} err 0
+[08:05:04] swift-after rep 2: search c=16 35728.0 rps p50 0.405 p99 1.159 {'200': 285844} err 0
+[08:05:14] swift-after rep 2: post_message c=16 3390.1 rps p50 4.371 p99 9.695 {'200': 27129} err 0
+[08:05:15] swift-after rep 2: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/swift-after-2.json
+[08:05:15] load before run: 6.33 4.81 3.25 (waited 0s)
+[08:05:15] swift-before rep 2: starting (load: 6.33 4.81 3.25)
+[08:05:25] swift-before rep 2: cold start 164ms, idle 5MB (anon 4MB)
+[08:05:35] swift-before rep 2: room_show c=16 16908.9 rps p50 0.895 p99 2.145 {'200': 135290} err 0
+[08:05:45] swift-before rep 2: messages_page c=16 20216.2 rps p50 0.66 p99 2.483 {'200': 161745} err 0
+[08:05:55] swift-before rep 2: sidebar c=16 16182.5 rps p50 0.822 p99 3.119 {'200': 129472} err 0
+[08:06:05] swift-before rep 2: search c=16 15708.3 rps p50 0.85 p99 3.143 {'200': 125683} err 0
+[08:06:15] swift-before rep 2: post_message c=16 2896.1 rps p50 4.339 p99 29.087 {'200': 23207} err 0
+[08:06:16] swift-before rep 2: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/swift-before-2.json
+[08:06:16] load before run: 6.23 4.99 3.40 (waited 0s)
+[08:06:16] swift-before rep 3: starting (load: 6.23 4.99 3.40)
+[08:06:27] swift-before rep 3: cold start 435ms, idle 5MB (anon 4MB)
+[08:06:37] swift-before rep 3: room_show c=16 17088.9 rps p50 0.871 p99 2.237 {'200': 136729} err 0
+[08:06:47] swift-before rep 3: messages_page c=16 20622.1 rps p50 0.658 p99 2.373 {'200': 164988} err 0
+[08:06:57] swift-before rep 3: sidebar c=16 16106.0 rps p50 0.81 p99 3.161 {'200': 128865} err 0
+[08:07:07] swift-before rep 3: search c=16 15731.9 rps p50 0.834 p99 3.177 {'200': 125873} err 0
+[08:07:17] swift-before rep 3: post_message c=16 3419.6 rps p50 4.315 p99 9.927 {'200': 27371} err 0
+[08:07:18] swift-before rep 3: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/swift-before-3.json
+[08:07:18] load before run: 7.13 5.41 3.65 (waited 0s)
+[08:07:18] swift-after rep 3: starting (load: 7.13 5.41 3.65)
+[08:07:28] swift-after rep 3: cold start 178ms, idle 5MB (anon 4MB)
+[08:07:39] swift-after rep 3: room_show c=16 33393.9 rps p50 0.455 p99 1.004 {'200': 267173} err 0
+[08:07:49] swift-after rep 3: messages_page c=16 33756.0 rps p50 0.434 p99 1.158 {'200': 270065} err 0
+[08:07:59] swift-after rep 3: sidebar c=16 36392.2 rps p50 0.396 p99 1.153 {'200': 291159} err 0
+[08:08:09] swift-after rep 3: search c=16 35949.7 rps p50 0.402 p99 1.171 {'200': 287616} err 0
+[08:08:19] swift-after rep 3: post_message c=16 3434.4 rps p50 4.283 p99 9.687 {'200': 27493} err 0
+[08:08:19] swift-after rep 3: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/swift-after-3.json
+[08:08:19] load before run: 8.43 6.01 3.96 (waited 0s)
+[08:08:19] rust rep 3: starting (load: 8.43 6.01 3.96)
+[08:08:30] rust rep 3: cold start 209ms, idle 15MB (anon 13MB)
+[08:08:40] rust rep 3: room_show c=16 30182.7 rps p50 0.509 p99 1.011 {'200': 241484} err 0
+[08:08:50] rust rep 3: messages_page c=16 28464.9 rps p50 0.541 p99 1.064 {'200': 227738} err 0
+[08:09:00] rust rep 3: sidebar c=16 32601.7 rps p50 0.462 p99 1.006 {'200': 260831} err 0
+[08:09:10] rust rep 3: search c=16 32080.9 rps p50 0.469 p99 1.018 {'200': 256666} err 0
+[08:09:20] rust rep 3: post_message c=16 2282.1 rps p50 6.591 p99 13.071 {'200': 18271} err 0
+[08:09:21] rust rep 3: done -> /home/piero/libs/once-campfire/benchmark-results/20261009-response-cache/rust-3.json

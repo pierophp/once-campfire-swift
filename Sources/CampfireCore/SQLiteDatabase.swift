@@ -167,13 +167,19 @@ public final class SQLiteConnection: @unchecked Sendable {
     }
 
     public func rows(_ sql: String, bindings: [SQLiteValue] = []) throws -> [SQLiteRow] {
+        var result: [SQLiteRow] = []
+        try eachRow(sql, bindings: bindings) { result.append($0); return true }
+        return result
+    }
+
+    /// Steps through the result while `body` returns true, so a scan can stop early.
+    public func eachRow(_ sql: String, bindings: [SQLiteValue] = [], _ body: (SQLiteRow) throws -> Bool) throws {
         lock.lock(); defer { lock.unlock() }
         let statement = try prepared(sql, bindings: bindings)
         defer { sqlite3_reset(statement); sqlite3_clear_bindings(statement) }
-        var result: [SQLiteRow] = []
         while true {
             let status = sqlite3_step(statement)
-            if status == SQLITE_DONE { return result }
+            if status == SQLITE_DONE { return }
             guard status == SQLITE_ROW else { throw failure(status) }
             var values: [SQLiteValue] = []
             values.reserveCapacity(Int(sqlite3_column_count(statement)))
@@ -184,7 +190,7 @@ public final class SQLiteConnection: @unchecked Sendable {
                 default: values.append(.null)
                 }
             }
-            result.append(SQLiteRow(values: values))
+            guard try body(SQLiteRow(values: values)) else { return }
         }
     }
 
@@ -295,6 +301,12 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private static let configureSQLite: Int32 = campfire_sqlite_config_multithread()
     public static var version: String { String(cString: sqlite3_libversion()) }
     public static var hasFTS5: Bool { sqlite3_compileoption_used("ENABLE_FTS5") != 0 }
+
+    /// A separate query-only connection whose `PRAGMA data_version` reveals every other
+    /// connection's commits. The caller serializes its use.
+    func openObserver() throws -> SQLiteConnection {
+        try SQLiteConnection(path: databasePath, queryOnly: true)
+    }
 
     /// Runs synchronously on one of the fixed reader connections. Call from a worker, not an event loop.
     public func read<T>(_ body: @escaping (SQLiteConnection) throws -> T) throws -> T {

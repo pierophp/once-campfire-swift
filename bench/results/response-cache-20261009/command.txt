@@ -1,0 +1,7 @@
+# run-http from bench/results/key-cache-20261006, with the loadgen rebuild line replaced by
+# `test -x "$LOADGEN"` (the loadgen moved to once-campfire-verification; the built binary was reused).
+CAMPFIRE_RUST_ROOT=../once-campfire-rust RUST_IMAGE=campfire-rust:app \
+SWIFT_IMAGE=campfire-swift:response-cache SWIFT_BASELINE_IMAGE=campfire-swift:before-response-cache \
+SERVER_CPUS=8-11 LOADGEN_CPUS=4-7 HTTP_SECS=8 HTTP_CONCS='16' SUITES=http \
+LOAD_MAX=10 LOAD_WAIT_SECS=30 PORT=4490 \
+  run-http --apps swift-before,swift-after,rust --reps 3 --out <dir>

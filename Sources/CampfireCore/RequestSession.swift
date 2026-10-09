@@ -11,6 +11,7 @@ struct SignedInUser: Sendable {
 }
 
 struct RequestSession: Sendable {
+    let id: Int64
     let token: String
     let user: SignedInUser
     let refreshed: Bool
@@ -39,7 +40,7 @@ enum SessionPipeline {
                 try connection.execute("UPDATE sessions SET last_active_at=strftime('%Y-%m-%d %H:%M:%f','now'), updated_at=strftime('%Y-%m-%d %H:%M:%f','now') WHERE id=?", bindings: [.integer(sessionID)])
             }
         }
-        return RequestSession(token: token, user: SignedInUser(id: id, name: name, updatedAt: userRow.string(4) ?? "", role: userRow.integer(2) ?? 0, email: userRow.string(3)), refreshed: refreshed)
+        return RequestSession(id: sessionID, token: token, user: SignedInUser(id: id, name: name, updatedAt: userRow.string(4) ?? "", role: userRow.integer(2) ?? 0, email: userRow.string(3)), refreshed: refreshed)
     }
 
     static func appendRefreshCookie(_ session: RequestSession, to response: inout Response) {

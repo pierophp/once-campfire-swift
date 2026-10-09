@@ -48,6 +48,7 @@ let package = Package(
             name: "CampfireTests",
             dependencies: [
                 "CampfireCore",
+                "CSQLite",
                 "CZlib",
                 .product(name: "HummingbirdTesting", package: "hummingbird"),
             ],

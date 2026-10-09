@@ -29,11 +29,18 @@ struct SidebarData: Sendable {
     let canCreateRooms: Bool
 }
 
-func installSidebarRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase) {
+func installSidebarRoutes(on router: Router<BasicRequestContext>, database: SQLiteDatabase, responseCache: ResponseCache) {
     router.get("/users/me/sidebar") { request, _ async throws -> Response in
+        let round = responseCache.begin(request, endpoint: "users/sidebars#show")
         guard let session = try await SessionPipeline.load(request, database: database) else {
             var response = Response(status: .found)
             response.headers[.location] = "/session/new"
+            return response
+        }
+        let flash = SessionPipeline.readFlash(request)
+        if let cached = responseCache.lookup(round, request: request, session: session, flash: flash) {
+            var response = cached.response(notModified: cached.etag != nil && request.headers[HTTPField.Name("if-none-match")!] == cached.etag)
+            SessionPipeline.appendRefreshCookie(session, to: &response)
             return response
         }
 
@@ -71,7 +78,6 @@ func installSidebarRoutes(on router: Router<BasicRequestContext>, database: SQLi
             return (layout, SidebarData(shared: shared, directs: directs, placeholders: placeholderUsers, canCreateRooms: session.user.role == 1 || !restricted))
         }
 
-        let flash = SessionPipeline.readFlash(request)
         let html = SidebarRenderer.render(user: session.user, account: layout.account, lastRoomID: layout.lastRoomID, shared: data.shared, directs: data.directs, placeholders: data.placeholders, canCreateRooms: data.canCreateRooms, flash: flash)
         let tag = html.etag()
         var response: Response
